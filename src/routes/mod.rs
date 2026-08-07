@@ -38,24 +38,22 @@ pub async fn search(
     }
 
     // Try local index first
-    if let Ok(local_results) = state.local_index.search(&query.query, query.max_results) {
-        if !local_results.is_empty() {
-            let response = crate::models::result::SearchResponse {
-                query: query.query.clone(),
-                results: local_results,
-                errors: Vec::new(),
-                answer: None,
-            };
-            let response = Arc::new(response);
-            state.cache.insert(key, response.clone()).await;
-            return (StatusCode::OK, Json((*response).clone())).into_response();
-        }
+    if let Some(local_results) = state.local_index.search_cached(&query.query) {
+        let response = crate::models::result::SearchResponse {
+            query: query.query.clone(),
+            results: local_results,
+            errors: Vec::new(),
+            answer: None,
+        };
+        let response = Arc::new(response);
+        state.cache.insert(key, response.clone()).await;
+        return (StatusCode::OK, Json((*response).clone())).into_response();
     }
 
     match aggregator::aggregate(&query, &state.registry, &state.suspension).await {
         Ok(response) => {
             // Index results for future queries
-            let _ = state.local_index.add_results(&response.results);
+            let _ = state.local_index.cache_results(&query.query, &response.results);
             let response = Arc::new(response);
             state.cache.insert(key, response.clone()).await;
             (StatusCode::OK, Json((*response).clone())).into_response()

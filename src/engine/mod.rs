@@ -56,4 +56,13 @@ impl EngineRegistry {
     pub fn names(&self) -> Vec<String> {
         self.engines.keys().cloned().collect()
     }
+
+    /// Get the weight of an engine by name.
+    ///
+    /// Returns the engine's configured weight, or 1.0 if the engine is not
+    /// registered. Weights influence result scoring: higher weights boost
+    /// results from that engine.
+    pub fn get_weight(&self, name: &str) -> f32 {
+        self.engines.get(name).map(|e| e.weight()).unwrap_or(1.0)
+    }
 }
