@@ -20,6 +20,11 @@ pub trait SearchEngine: Send + Sync {
         10
     }
 
+    /// Engine weight for relevance scoring.
+    fn weight(&self) -> f32 {
+        1.0
+    }
+
     /// Whether the engine supports the given query.
     fn supports(&self, _query: &SearchQuery) -> bool {
         true

@@ -6,6 +6,8 @@ pub mod config;
 pub mod dedup;
 pub mod engine;
 pub mod fetcher;
+pub mod index;
 pub mod models;
+pub mod proxy;
 pub mod ranking;
 pub mod routes;

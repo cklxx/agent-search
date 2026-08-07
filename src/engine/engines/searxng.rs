@@ -4,29 +4,44 @@
 //! This gives us access to all 200+ engines that SearXNG supports
 //! while we handle aggregation, dedup, scoring, and the agent API.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 use reqwest::Client;
 
+use crate::engine::engines::{build_pool_clients, pick_client};
+use crate::engine::trait_def::SearchEngine;
 use crate::models::error::{EngineResult, SearchError};
 use crate::models::query::SearchQuery;
 use crate::models::result::RawSearchResult;
-use crate::engine::trait_def::SearchEngine;
+use crate::proxy::ProxyManager;
+
+const USER_AGENT: &str = "agent-search/0.1";
 
 /// SearXNG upstream search engine.
 pub struct Searxng {
-    client: Client,
+    pool_clients: Vec<Client>,
+    default_client: Client,
+    proxy_manager: Option<Arc<ProxyManager>>,
     base_url: String,
 }
 
 impl Searxng {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, proxy_manager: Option<Arc<ProxyManager>>) -> Self {
+        let headers = HeaderMap::new();
+        let (pool_clients, default_client, proxy_manager) =
+            build_pool_clients(USER_AGENT, &headers, proxy_manager);
         Self {
-            client: Client::builder()
-                .user_agent("agent-search/0.1")
-                .build()
-                .expect("failed to build HTTP client"),
+            pool_clients,
+            default_client,
+            proxy_manager,
             base_url: base_url.into(),
         }
+    }
+
+    fn client(&self) -> &Client {
+        pick_client(&self.pool_clients, &self.default_client, &self.proxy_manager)
     }
 }
 
@@ -64,7 +79,7 @@ impl SearchEngine for Searxng {
         }
 
         let url = format!("{}/search", self.base_url);
-        let resp = self.client.get(&url).query(&params).send().await?;
+        let resp = self.client().get(&url).query(&params).send().await?;
 
         if !resp.status().is_success() {
             return Err(SearchError::Request(format!(

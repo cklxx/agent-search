@@ -55,22 +55,29 @@ pub async fn aggregate(
         });
     }
 
-    // url -> (raw_result, engines)
-    let mut dedup_map: HashMap<String, (RawSearchResult, Vec<String>)> = HashMap::new();
+    // url -> (raw_result, engines, weight)
+    let mut dedup_map: HashMap<String, (RawSearchResult, Vec<String>, f32)> = HashMap::new();
     let mut errors: Vec<EngineErrorInfo> = Vec::new();
 
     while let Some(Ok((engine_name, result))) = tasks.join_next().await {
         match result {
             Ok(raw_results) => {
                 suspension.record_success(&engine_name);
+                // Find the engine weight
+                let engine_weight = engines
+                    .iter()
+                    .find(|e| e.name() == engine_name)
+                    .map(|e| e.weight())
+                    .unwrap_or(1.0);
                 for raw in raw_results {
                     let key = normalize_url(&raw.url);
                     match dedup_map.get_mut(&key) {
-                        Some((_, engines)) => {
+                        Some((_, engines, weight)) => {
                             engines.push(engine_name.clone());
+                            *weight = weight.max(engine_weight);
                         }
                         None => {
-                            dedup_map.insert(key, (raw, vec![engine_name.clone()]));
+                            dedup_map.insert(key, (raw, vec![engine_name.clone()], engine_weight));
                         }
                     }
                 }
@@ -93,9 +100,8 @@ pub async fn aggregate(
     // Score and sort
     let mut results: Vec<SearchResult> = dedup_map
         .into_iter()
-        .map(|(_, (raw, engines))| {
-            let engine_weight = 1.0; // TODO: per-engine weight from config
-            let mut scored = score_result(raw, query, engine_weight);
+        .map(|(_, (raw, engines, weight))| {
+            let mut scored = score_result(raw, query, weight);
             scored.engine = engines[0].clone();
             scored.engines = engines;
             scored

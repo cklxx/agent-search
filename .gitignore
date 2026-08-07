@@ -3,3 +3,4 @@ Cargo.lock
 *.log
 config.local.toml
 .DS_Store
+/data/

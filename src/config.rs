@@ -3,6 +3,8 @@
 use serde::Deserialize;
 use std::path::Path;
 
+use crate::proxy::ProxyManager;
+
 /// Server configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -24,6 +26,10 @@ pub struct Config {
     /// SearXNG upstream instance URL.
     #[serde(default = "default_searxng_url")]
     pub searxng_url: String,
+
+    /// Proxy pool for engine requests (round-robin rotation).
+    #[serde(default)]
+    pub proxy_urls: Vec<String>,
 }
 
 fn default_searxng_url() -> String {
@@ -59,6 +65,7 @@ impl Default for Config {
             cache_size: default_cache_size(),
             cache_ttl_secs: default_cache_ttl(),
             searxng_url: default_searxng_url(),
+            proxy_urls: Vec::new(),
         }
     }
 }
@@ -70,5 +77,10 @@ impl Config {
             Ok(content) => toml::from_str(&content).unwrap_or_default(),
             Err(_) => Self::default(),
         }
+    }
+
+    /// Build a [`ProxyManager`] from the configured proxy URLs.
+    pub fn proxy_manager(&self) -> ProxyManager {
+        ProxyManager::new(self.proxy_urls.clone())
     }
 }

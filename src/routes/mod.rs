@@ -13,6 +13,7 @@ use tokio_stream::StreamExt;
 use crate::aggregator;
 use crate::cache::{QueryCache, cache_key};
 use crate::engine::{EngineRegistry, EngineSuspensionManager};
+use crate::index::LocalIndex;
 use crate::models::query::SearchQuery;
 
 /// Application state shared across requests.
@@ -21,6 +22,7 @@ pub struct AppState {
     pub registry: Arc<EngineRegistry>,
     pub cache: QueryCache,
     pub suspension: Arc<EngineSuspensionManager>,
+    pub local_index: Arc<LocalIndex>,
 }
 
 /// POST /search
@@ -35,8 +37,25 @@ pub async fn search(
         return (StatusCode::OK, Json((*cached).clone())).into_response();
     }
 
+    // Try local index first
+    if let Ok(local_results) = state.local_index.search(&query.query, query.max_results) {
+        if !local_results.is_empty() {
+            let response = crate::models::result::SearchResponse {
+                query: query.query.clone(),
+                results: local_results,
+                errors: Vec::new(),
+                answer: None,
+            };
+            let response = Arc::new(response);
+            state.cache.insert(key, response.clone()).await;
+            return (StatusCode::OK, Json((*response).clone())).into_response();
+        }
+    }
+
     match aggregator::aggregate(&query, &state.registry, &state.suspension).await {
         Ok(response) => {
+            // Index results for future queries
+            let _ = state.local_index.add_results(&response.results);
             let response = Arc::new(response);
             state.cache.insert(key, response.clone()).await;
             (StatusCode::OK, Json((*response).clone())).into_response()

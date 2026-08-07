@@ -2,6 +2,8 @@
 //!
 //! Supports both HTML (CSS selectors) and JSON API engines.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use reqwest::header::HeaderMap;
 use reqwest::Client;
@@ -12,32 +14,79 @@ use crate::engine::trait_def::SearchEngine;
 use crate::models::error::{EngineResult, SearchError};
 use crate::models::query::SearchQuery;
 use crate::models::result::RawSearchResult;
+use crate::proxy::ProxyManager;
+
+const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// A search engine driven by declarative configuration.
 pub struct ConfigurableEngine {
     config: EngineConfig,
-    client: Client,
+    /// One client per proxy URL in the global pool, aligned with `ProxyManager::urls`.
+    /// Empty when the engine uses its own proxy or no proxy at all.
+    pool_clients: Vec<Client>,
+    /// Fallback client: used when the engine has its own proxy, or no proxies are configured.
+    default_client: Client,
+    /// Global proxy pool. `None` when the engine pins its own proxy or has no pool.
+    proxy_manager: Option<Arc<ProxyManager>>,
 }
 
 impl ConfigurableEngine {
-    pub fn new(config: EngineConfig) -> Self {
-        let mut headers = HeaderMap::new();
-        for (key, value) in &config.headers {
-            if let (Ok(k), Ok(v)) = (
-                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                reqwest::header::HeaderValue::from_str(value),
-            ) {
-                headers.insert(k, v);
+    /// Create a configurable engine with an optional global proxy pool.
+    ///
+    /// Proxy precedence:
+    /// 1. Engine-specific `proxy` in the YAML config (pinned, single client).
+    /// 2. Global proxy pool from `proxy_manager` (round-robin per request).
+    /// 3. No proxy.
+    pub fn new(config: EngineConfig, proxy_manager: Option<Arc<ProxyManager>>) -> Self {
+        let headers = build_headers(&config);
+
+        // 1. Engine-specific proxy wins.
+        if let Some(engine_proxy) = &config.proxy {
+            let client = build_client(&headers, Some(engine_proxy));
+            return Self {
+                config,
+                pool_clients: Vec::new(),
+                default_client: client,
+                proxy_manager: None,
+            };
+        }
+
+        // 2. Global proxy pool: build one client per proxy, rotate per request.
+        if let Some(pm) = proxy_manager {
+            if !pm.is_empty() {
+                let pool_clients: Vec<Client> = pm
+                    .urls()
+                    .iter()
+                    .map(|url| build_client(&headers, Some(url)))
+                    .collect();
+                let default_client = build_client(&headers, None);
+                return Self {
+                    config,
+                    pool_clients,
+                    default_client,
+                    proxy_manager: Some(pm),
+                };
             }
         }
 
-        let client = Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .default_headers(headers)
-            .build()
-            .expect("failed to build HTTP client");
+        // 3. No proxy.
+        let client = build_client(&headers, None);
+        Self {
+            config,
+            pool_clients: Vec::new(),
+            default_client: client,
+            proxy_manager: None,
+        }
+    }
 
-        Self { config, client }
+    /// Pick the client to use for the next request.
+    fn client(&self) -> &Client {
+        if let Some(pm) = &self.proxy_manager {
+            if let Some(idx) = pm.next_index() {
+                return &self.pool_clients[idx];
+            }
+        }
+        &self.default_client
     }
 
     /// Parse HTML response using CSS selectors.
@@ -153,6 +202,35 @@ impl ConfigurableEngine {
     }
 }
 
+/// Build the default header map from engine config.
+fn build_headers(config: &EngineConfig) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (key, value) in &config.headers {
+        if let (Ok(k), Ok(v)) = (
+            reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            headers.insert(k, v);
+        }
+    }
+    headers
+}
+
+/// Build an HTTP client with the given proxy (if any).
+fn build_client(headers: &HeaderMap, proxy: Option<&str>) -> Client {
+    let mut builder = Client::builder()
+        .user_agent(DEFAULT_USER_AGENT)
+        .default_headers(headers.clone());
+
+    if let Some(url) = proxy {
+        if let Ok(p) = reqwest::Proxy::all(url) {
+            builder = builder.proxy(p);
+        }
+    }
+
+    builder.build().expect("failed to build HTTP client")
+}
+
 #[async_trait]
 impl SearchEngine for ConfigurableEngine {
     fn name(&self) -> &'static str {
@@ -176,6 +254,10 @@ impl SearchEngine for ConfigurableEngine {
         self.config.timeout
     }
 
+    fn weight(&self) -> f32 {
+        self.config.weight
+    }
+
     async fn search(&self, query: &SearchQuery) -> EngineResult<Vec<RawSearchResult>> {
         let url = self.config.build_url(
             &query.query,
@@ -185,9 +267,11 @@ impl SearchEngine for ConfigurableEngine {
             query.safe_search,
         );
 
+        let client = self.client();
+
         let mut request = match self.config.method.as_str() {
-            "POST" => self.client.post(&url),
-            _ => self.client.get(&url),
+            "POST" => client.post(&url),
+            _ => client.get(&url),
         };
 
         for (key, value) in &self.config.cookies {

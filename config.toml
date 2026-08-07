@@ -12,3 +12,12 @@ cache_ttl_secs = 30
 
 # SearXNG upstream instance
 searxng_url = "http://127.0.0.1:39217"
+
+# Proxy pool for engine requests.
+# Proxies are rotated round-robin per request across all engines.
+# Supported schemes: http://, https://, socks5://, socks5h://
+# Leave empty to disable proxies.
+proxy_urls = [
+  # "http://127.0.0.1:7890",
+  # "socks5://127.0.0.1:1080",
+]

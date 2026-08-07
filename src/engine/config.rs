@@ -88,6 +88,14 @@ pub struct EngineConfig {
     #[serde(default = "default_timeout")]
     pub timeout: u64,
 
+    /// Engine weight for scoring (higher = more trusted).
+    #[serde(default = "default_weight")]
+    pub weight: f32,
+
+    /// Optional proxy URL for this engine (overrides global proxy pool).
+    #[serde(default)]
+    pub proxy: Option<String>,
+
     /// HTML-specific selectors (only for type "html").
     #[serde(default)]
     pub html: Option<HtmlSelectors>,
@@ -127,6 +135,10 @@ fn default_time_range_url() -> String {
 
 fn default_timeout() -> u64 {
     10
+}
+
+fn default_weight() -> f32 {
+    1.0
 }
 
 /// Engine type.

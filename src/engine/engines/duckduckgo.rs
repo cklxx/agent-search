@@ -1,27 +1,42 @@
 //! DuckDuckGo search engine (HTML scraping).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 use reqwest::Client;
 use scraper::{Html, Selector};
 
+use crate::engine::engines::{build_pool_clients, pick_client};
+use crate::engine::trait_def::SearchEngine;
 use crate::models::error::{EngineResult, SearchError};
 use crate::models::query::SearchQuery;
 use crate::models::result::RawSearchResult;
-use crate::engine::trait_def::SearchEngine;
+use crate::proxy::ProxyManager;
+
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// DuckDuckGo HTML search engine.
 pub struct DuckDuckGo {
-    client: Client,
+    pool_clients: Vec<Client>,
+    default_client: Client,
+    proxy_manager: Option<Arc<ProxyManager>>,
 }
 
 impl DuckDuckGo {
-    pub fn new() -> Self {
+    pub fn new(proxy_manager: Option<Arc<ProxyManager>>) -> Self {
+        let headers = HeaderMap::new();
+        let (pool_clients, default_client, proxy_manager) =
+            build_pool_clients(USER_AGENT, &headers, proxy_manager);
         Self {
-            client: Client::builder()
-                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .build()
-                .expect("failed to build HTTP client"),
+            pool_clients,
+            default_client,
+            proxy_manager,
         }
+    }
+
+    fn client(&self) -> &Client {
+        pick_client(&self.pool_clients, &self.default_client, &self.proxy_manager)
     }
 }
 
@@ -41,7 +56,7 @@ impl SearchEngine for DuckDuckGo {
             urlencoding::encode(&query.query)
         );
 
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.client().get(&url).send().await?;
         let body = resp.text().await?;
         let doc = Html::parse_document(&body);
 

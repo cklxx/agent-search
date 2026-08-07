@@ -10,6 +10,7 @@ use agent_search::cache::QueryCache;
 use agent_search::config::Config;
 use agent_search::engine::engines::builtin_registry;
 use agent_search::engine::EngineSuspensionManager;
+use agent_search::index::LocalIndex;
 use agent_search::routes::{AppState, fetch_content, health, list_engines, search, search_stream};
 
 #[tokio::main]
@@ -24,16 +25,24 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(std::path::Path::new("config.toml"));
     tracing::info!("starting agent-search on {}:{}", config.host, config.port);
 
-    let registry = builtin_registry(&config.searxng_url);
+    let proxy_manager = Arc::new(config.proxy_manager());
+    let registry = builtin_registry(&config.searxng_url, Some(proxy_manager.clone()));
     tracing::info!("registered engines: {:?}", registry.names());
 
     let cache = QueryCache::new(config.cache_size, Duration::from_secs(config.cache_ttl_secs));
     let suspension = Arc::new(EngineSuspensionManager::default());
 
+    // Local index: try persistent disk index, fall back to in-memory
+    let local_index = Arc::new(
+        LocalIndex::open_or_create(std::path::Path::new("data/index"))
+            .unwrap_or_else(|_| LocalIndex::new_in_ram().expect("failed to create in-memory index")),
+    );
+
     let state = AppState {
         registry: Arc::new(registry),
         cache,
         suspension,
+        local_index,
     };
 
     let app = Router::new()
