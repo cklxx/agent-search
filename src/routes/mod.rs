@@ -12,7 +12,7 @@ use tokio_stream::StreamExt;
 
 use crate::aggregator;
 use crate::cache::{QueryCache, cache_key};
-use crate::engine::EngineRegistry;
+use crate::engine::{EngineRegistry, EngineSuspensionManager};
 use crate::models::query::SearchQuery;
 
 /// Application state shared across requests.
@@ -20,6 +20,7 @@ use crate::models::query::SearchQuery;
 pub struct AppState {
     pub registry: Arc<EngineRegistry>,
     pub cache: QueryCache,
+    pub suspension: Arc<EngineSuspensionManager>,
 }
 
 /// POST /search
@@ -34,7 +35,7 @@ pub async fn search(
         return (StatusCode::OK, Json((*cached).clone())).into_response();
     }
 
-    match aggregator::aggregate(&query, &state.registry).await {
+    match aggregator::aggregate(&query, &state.registry, &state.suspension).await {
         Ok(response) => {
             let response = Arc::new(response);
             state.cache.insert(key, response.clone()).await;
@@ -67,9 +68,10 @@ pub async fn search_stream(
     let (tx, _rx) = broadcast::channel(100);
     let tx_clone = tx.clone();
     let registry = state.registry.clone();
+    let suspension = state.suspension.clone();
 
     tokio::spawn(async move {
-        let response = aggregator::aggregate(&query, &registry).await;
+        let response = aggregator::aggregate(&query, &registry, &suspension).await;
         match response {
             Ok(resp) => {
                 for result in resp.results {

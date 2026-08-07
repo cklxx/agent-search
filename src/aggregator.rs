@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use crate::dedup::normalize_url;
-use crate::engine::{EngineRef, EngineRegistry};
+use crate::engine::{EngineRef, EngineRegistry, EngineSuspensionManager};
 use crate::models::error::{EngineResult, SearchError};
 use crate::models::query::SearchQuery;
 use crate::models::result::{EngineErrorInfo, RawSearchResult, SearchResponse, SearchResult};
@@ -14,15 +14,18 @@ use crate::ranking::score_result;
 
 /// Aggregate search results from multiple engines.
 ///
-/// 1. Spawns an async task per engine via JoinSet
-/// 2. Collects results, deduplicates by normalized URL
-/// 3. Scores each result (TF + position + engine weight)
-/// 4. Sorts by score descending
+/// 1. Skips suspended engines
+/// 2. Spawns an async task per engine via JoinSet
+/// 3. Collects results, deduplicates by normalized URL
+/// 4. Scores each result (TF + position + engine weight)
+/// 5. Sorts by score descending
+/// 6. Records success/error for suspension tracking
 pub async fn aggregate(
     query: &SearchQuery,
     registry: &EngineRegistry,
+    suspension: &EngineSuspensionManager,
 ) -> EngineResult<SearchResponse> {
-    let engines = select_engines(query, registry);
+    let engines = select_engines(query, registry, suspension);
 
     if engines.is_empty() {
         return Ok(SearchResponse {
@@ -59,6 +62,7 @@ pub async fn aggregate(
     while let Some(Ok((engine_name, result))) = tasks.join_next().await {
         match result {
             Ok(raw_results) => {
+                suspension.record_success(&engine_name);
                 for raw in raw_results {
                     let key = normalize_url(&raw.url);
                     match dedup_map.get_mut(&key) {
@@ -72,9 +76,15 @@ pub async fn aggregate(
                 }
             }
             Err(e) => {
+                let suspended = suspension.record_error(&engine_name, &e);
+                let error_msg = if let Some(dur) = suspended {
+                    format!("{} (suspended for {}s)", e, dur.as_secs())
+                } else {
+                    e.to_string()
+                };
                 errors.push(EngineErrorInfo {
                     engine: engine_name,
-                    error: e.to_string(),
+                    error: error_msg,
                 });
             }
         }
@@ -105,9 +115,16 @@ pub async fn aggregate(
     })
 }
 
-/// Select engines based on the query.
-fn select_engines(_query: &SearchQuery, registry: &EngineRegistry) -> Vec<EngineRef> {
-    // For now, use all general engines.
-    // TODO: support category selection, domain-specific engines, etc.
-    registry.by_category("general")
+/// Select engines based on the query, skipping suspended ones.
+fn select_engines(
+    _query: &SearchQuery,
+    registry: &EngineRegistry,
+    suspension: &EngineSuspensionManager,
+) -> Vec<EngineRef> {
+    registry
+        .by_category("general")
+        .into_iter()
+        .filter(|e| !suspension.is_suspended(e.name()))
+        .collect()
 }
+

@@ -9,6 +9,7 @@ use tower_http::trace::TraceLayer;
 use agent_search::cache::QueryCache;
 use agent_search::config::Config;
 use agent_search::engine::engines::builtin_registry;
+use agent_search::engine::EngineSuspensionManager;
 use agent_search::routes::{AppState, health, list_engines, search, search_stream};
 
 #[tokio::main]
@@ -27,10 +28,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("registered engines: {:?}", registry.names());
 
     let cache = QueryCache::new(config.cache_size, Duration::from_secs(config.cache_ttl_secs));
+    let suspension = Arc::new(EngineSuspensionManager::default());
 
     let state = AppState {
         registry: Arc::new(registry),
         cache,
+        suspension,
     };
 
     let app = Router::new()

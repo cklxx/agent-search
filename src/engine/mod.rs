@@ -3,10 +3,12 @@
 pub mod config;
 pub mod configurable;
 pub mod engines;
+pub mod suspension;
 pub mod trait_def;
 
 pub use config::*;
 pub use configurable::ConfigurableEngine;
+pub use suspension::EngineSuspensionManager;
 pub use trait_def::*;
 
 use std::collections::HashMap;
