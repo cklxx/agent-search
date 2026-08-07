@@ -1,0 +1,14 @@
+# Agent Search configuration
+
+host = "127.0.0.1"
+port = 8080
+
+# Per-engine request timeout in seconds
+request_timeout = 10
+
+# Query cache
+cache_size = 1000
+cache_ttl_secs = 30
+
+# SearXNG upstream instance
+searxng_url = "http://127.0.0.1:39217"
