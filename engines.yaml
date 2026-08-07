@@ -225,3 +225,168 @@
     url: "arcurl"
     title: "title"
     content: "description"
+
+# --- Additional JSON engines migrated from SearXNG ---
+
+- name: packagist
+  type: json
+  categories: [packages]
+  search_url: "https://packagist.org/search.json?q={query}&page={pageno}"
+  paging: true
+  json:
+    results: "results"
+    url: "url"
+    title: "name"
+    content: "description"
+
+- name: mankier
+  type: json
+  categories: [it]
+  search_url: "https://www.mankier.com/api/v2/mans/?q={query}"
+  json:
+    results: "results"
+    url: "url"
+    title: "name"
+    content: "description"
+
+- name: wiby
+  type: json
+  categories: [general, web]
+  search_url: "https://wiby.me/json/?q={query}&p={pageno}"
+  paging: true
+  json:
+    results: ""
+    url: "URL"
+    title: "Title"
+    content: "Snippet"
+
+- name: crowdview
+  type: json
+  categories: [general, web]
+  search_url: "https://crowdview-next-js.onrender.com/api/search-v3?query={query}"
+  json:
+    results: "results"
+    url: "link"
+    title: "title"
+    content: "snippet"
+
+- name: avalw
+  type: json
+  categories: [general, web]
+  search_url: "https://avalw.org/api/search?q={query}&page={pageno}&limit=10&tbm=all"
+  paging: true
+  json:
+    results: "results"
+    url: "url"
+    title: "title"
+    content: "snippet"
+
+- name: cl0q
+  type: json
+  categories: [general, web]
+  search_url: "https://cl0q.com/search?q={query}&limit=20&offset={pageno}"
+  paging: true
+  page_size: 20
+  json:
+    results: "results"
+    url: "domain"
+    url_prefix: "https://"
+    title: "title"
+    content: "description"
+
+- name: rawweb
+  type: json
+  categories: [general, web]
+  search_url: "https://api.rawweb.org/api/search?keyword={query}&page={pageno}&lang=*"
+  paging: true
+  json:
+    results: "data"
+    url: "link"
+    title: "title"
+    content: "content"
+
+- name: sina
+  type: json
+  categories: [general, news]
+  search_url: "https://search.sina.com.cn/api/search?q={query}&tp=mix&sort=0&page={pageno}&size=10&from=search_result"
+  paging: true
+  json:
+    results: "data/list"
+    url: "url"
+    title: "title"
+    content: "intro"
+
+- name: lobsters
+  type: html
+  categories: [general, it]
+  search_url: "https://lobste.rs/search?q={query}&what=stories&order=relevance"
+  html:
+    results: ".story"
+    url: "a.u-url"
+    title: "a.u-url"
+    content: ".story_text"
+
+- name: bitbucket
+  type: html
+  categories: [repos]
+  search_url: "https://bitbucket.org/repo/all/{pageno}?name={query}"
+  paging: true
+  html:
+    results: "article.repo-summary"
+    url: "a.repo-link"
+    title: "a.repo-link"
+    content: "p"
+
+- name: hoogle
+  type: html
+  categories: [it]
+  search_url: "https://hoogle.haskell.org/?hoogle={query}"
+  html:
+    results: ".result"
+    url: "a"
+    title: "a"
+    content: ".doc"
+
+- name: pubdev
+  type: html
+  categories: [packages]
+  search_url: "https://pub.dev/packages?q={query}&page={pageno}"
+  paging: true
+  html:
+    results: ".packages-item"
+    url: "a.packages-title"
+    title: "a.packages-title"
+    content: ".packages-description"
+
+- name: tmdb
+  type: html
+  categories: [movies]
+  search_url: "https://www.themoviedb.org/search?page={pageno}&query={query}"
+  paging: true
+  html:
+    results: ".search-result"
+    url: "a"
+    title: "h2"
+    content: "p"
+
+- name: etymonline
+  type: html
+  categories: [dictionaries]
+  search_url: "https://etymonline.com/search?page={pageno}&q={query}"
+  paging: true
+  html:
+    results: ".word--C9UPa"
+    url: "a"
+    title: "a"
+    content: ".word__defination"
+
+- name: anaconda
+  type: html
+  categories: [packages]
+  search_url: "https://anaconda.org/search?q={query}&page={pageno}"
+  paging: true
+  html:
+    results: ".packageList li"
+    url: "a"
+    title: "a"
+    content: "span"
