@@ -91,3 +91,39 @@ pub async fn search_stream(
 
     Sse::new(stream)
 }
+
+/// GET /content?url=...
+///
+/// Fetch the full content of a URL and return extracted text.
+pub async fn fetch_content(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let url = match params.get("url") {
+        Some(u) => u.clone(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "url parameter is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    match crate::fetcher::fetch_content(&url).await {
+        Ok(content) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "url": content.url,
+                "title": content.title,
+                "content": content.content,
+                "fetched_at": content.fetched_at.to_rfc3339(),
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}

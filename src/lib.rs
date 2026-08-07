@@ -5,6 +5,7 @@ pub mod cache;
 pub mod config;
 pub mod dedup;
 pub mod engine;
+pub mod fetcher;
 pub mod models;
 pub mod ranking;
 pub mod routes;

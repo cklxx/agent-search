@@ -10,7 +10,7 @@ use agent_search::cache::QueryCache;
 use agent_search::config::Config;
 use agent_search::engine::engines::builtin_registry;
 use agent_search::engine::EngineSuspensionManager;
-use agent_search::routes::{AppState, health, list_engines, search, search_stream};
+use agent_search::routes::{AppState, fetch_content, health, list_engines, search, search_stream};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/engines", get(list_engines))
         .route("/search", post(search))
         .route("/search/stream", post(search_stream))
+        .route("/content", get(fetch_content))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
