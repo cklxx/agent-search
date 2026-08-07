@@ -1,8 +1,12 @@
 //! Search engine trait and registry.
 
-pub mod trait_def;
+pub mod config;
+pub mod configurable;
 pub mod engines;
+pub mod trait_def;
 
+pub use config::*;
+pub use configurable::ConfigurableEngine;
 pub use trait_def::*;
 
 use std::collections::HashMap;
