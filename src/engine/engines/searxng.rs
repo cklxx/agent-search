@@ -1,8 +1,4 @@
 //! SearXNG upstream engine.
-//!
-//! Uses a SearXNG instance as the upstream search provider.
-//! This gives us access to all 200+ engines that SearXNG supports
-//! while we handle aggregation, dedup, scoring, and the agent API.
 
 use std::sync::Arc;
 
@@ -19,7 +15,6 @@ use crate::proxy::ProxyManager;
 
 const USER_AGENT: &str = "agent-search/0.1";
 
-/// SearXNG upstream search engine.
 pub struct Searxng {
     pool_clients: Vec<Client>,
     default_client: Client,
@@ -64,7 +59,6 @@ impl SearchEngine for Searxng {
             ("q", query.query.clone()),
             ("format", "json".to_string()),
             ("pageno", (query.page + 1).to_string()),
-            // Use a curated set of reliable general engines
             ("engines", "bing,google,wikipedia,duckduckgo".to_string()),
         ];
 

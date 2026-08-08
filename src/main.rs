@@ -33,13 +33,12 @@ async fn main() -> anyhow::Result<()> {
     let cache = QueryCache::new(config.cache_size, Duration::from_secs(config.cache_ttl_secs));
     let suspension = Arc::new(EngineSuspensionManager::default());
 
-    // Local index: try persistent disk index, fall back to in-memory
+    // Disk index, fall back to in-memory.
     let local_index = Arc::new(
         LocalIndex::open_or_create(std::path::Path::new("data/index"))
             .unwrap_or_else(|_| LocalIndex::new_in_ram().expect("failed to create in-memory index")),
     );
 
-    // Default ranking strategy from config
     let strategy = get_strategy(&config.strategy);
     tracing::info!("ranking strategy: {}", strategy.name());
 

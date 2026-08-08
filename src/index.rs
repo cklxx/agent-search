@@ -1,8 +1,4 @@
-//! Local full-text index for caching popular search queries.
-//!
-//! Uses Tantivy with BM25 scoring to build an in-memory/disk index of
-//! search results. Repeated or similar queries are served locally
-//! without hitting upstream search engines.
+//! Local Tantivy index for caching search results.
 
 use std::path::Path;
 
@@ -13,10 +9,8 @@ use tantivy::{doc, Index, IndexWriter, TantivyError};
 
 use crate::models::result::SearchResult;
 
-/// Default number of results returned by [`LocalIndex::search_cached`].
 const DEFAULT_SEARCH_LIMIT: usize = 20;
 
-/// Local search index backed by Tantivy (BM25 scoring).
 pub struct LocalIndex {
     index: Index,
     query_field: Field,
@@ -28,22 +22,19 @@ pub struct LocalIndex {
 }
 
 impl LocalIndex {
-    /// Create a new in-memory index.
     pub fn new_in_ram() -> Result<Self, TantivyError> {
         let (schema, fields) = build_schema();
         let index = Index::create_in_ram(schema);
         Ok(Self::from_parts(index, fields))
     }
 
-    /// Open or create a persistent index at the given directory.
     pub fn open_or_create(dir: &Path) -> Result<Self, TantivyError> {
         let (schema, fields) = build_schema();
         let index = if dir.exists() {
             Index::open_in_dir(dir)?
         } else {
-            std::fs::create_dir_all(dir).map_err(|e| {
-                TantivyError::InvalidArgument(format!("failed to create index dir: {}", e))
-            })?;
+            std::fs::create_dir_all(dir)
+                .map_err(|e| TantivyError::InvalidArgument(format!("failed to create index dir: {}", e)))?;
             Index::create_in_dir(dir, schema)?
         };
         Ok(Self::from_parts(index, fields))
@@ -61,10 +52,7 @@ impl LocalIndex {
         }
     }
 
-    /// Cache a batch of search results for the given query.
-    ///
-    /// Each result is indexed alongside the originating query string so
-    /// that subsequent similar queries can retrieve them via BM25 search.
+    /// Index results alongside the query that produced them.
     pub fn cache_results(&self, query: &str, results: &[SearchResult]) -> Result<(), TantivyError> {
         let mut index_writer: IndexWriter = self.index.writer(50_000_000)?;
 
@@ -83,22 +71,14 @@ impl LocalIndex {
         Ok(())
     }
 
-    /// Search the cached index for results matching `query`.
-    ///
-    /// Uses BM25 scoring across the `query`, `title`, `snippet`, and `url`
-    /// fields. Returns `None` if the search fails or no results match.
+    /// BM25 search across query, title, snippet, url fields.
     pub fn search_cached(&self, query: &str) -> Option<Vec<SearchResult>> {
         let reader = self.index.reader().ok()?;
         let searcher = reader.searcher();
 
         let query_parser = QueryParser::for_index(
             &self.index,
-            vec![
-                self.query_field,
-                self.title_field,
-                self.snippet_field,
-                self.url_field,
-            ],
+            vec![self.query_field, self.title_field, self.snippet_field, self.url_field],
         );
         let parsed_query = query_parser.parse_query(query).ok()?;
 
@@ -130,15 +110,10 @@ impl LocalIndex {
             });
         }
 
-        if results.is_empty() {
-            None
-        } else {
-            Some(results)
-        }
+        if results.is_empty() { None } else { Some(results) }
     }
 }
 
-/// Schema field handles returned from [`build_schema`].
 struct IndexFields {
     query: Field,
     title: Field,
@@ -148,7 +123,6 @@ struct IndexFields {
     engine: Field,
 }
 
-/// Build the index schema and return it together with the field handles.
 fn build_schema() -> (Schema, IndexFields) {
     let mut schema_builder = Schema::builder();
     let query = schema_builder.add_text_field("query", TEXT | STORED);
@@ -158,23 +132,9 @@ fn build_schema() -> (Schema, IndexFields) {
     let score = schema_builder.add_f64_field("score", STORED);
     let engine = schema_builder.add_text_field("engine", TEXT | STORED);
     let schema = schema_builder.build();
-    (
-        schema,
-        IndexFields {
-            query,
-            title,
-            url,
-            snippet,
-            score,
-            engine,
-        },
-    )
+    (schema, IndexFields { query, title, url, snippet, score, engine })
 }
 
-/// Extract the first stored string value of `field` from `doc`, defaulting to "".
 fn field_str(doc: &tantivy::schema::TantivyDocument, field: Field) -> String {
-    doc.get_first(field)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
+    doc.get_first(field).and_then(|v| v.as_str()).unwrap_or("").to_string()
 }

@@ -16,7 +16,6 @@ use crate::proxy::ProxyManager;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-/// DuckDuckGo HTML search engine.
 pub struct DuckDuckGo {
     pool_clients: Vec<Client>,
     default_client: Client,
@@ -86,11 +85,7 @@ impl SearchEngine for DuckDuckGo {
 
             // DuckDuckGo wraps URLs in redirect: //duckduckgo.com/l/?uddg=...
             let url = if url.contains("uddg=") {
-                if let Some(decoded) = extract_uddg(&url) {
-                    decoded
-                } else {
-                    url
-                }
+                extract_uddg(&url).unwrap_or(url)
             } else {
                 url
             };
@@ -108,7 +103,6 @@ impl SearchEngine for DuckDuckGo {
     }
 }
 
-/// Extract the real URL from a DuckDuckGo redirect link.
 fn extract_uddg(ddg_url: &str) -> Option<String> {
     let full = if ddg_url.starts_with("//") {
         format!("https:{}", ddg_url)

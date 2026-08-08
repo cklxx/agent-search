@@ -1,11 +1,10 @@
-//! Configuration loading.
+//! Server configuration (TOML).
 
 use serde::Deserialize;
 use std::path::Path;
 
 use crate::proxy::ProxyManager;
 
-/// Server configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default = "default_host")]
@@ -23,15 +22,12 @@ pub struct Config {
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl_secs: u64,
 
-    /// SearXNG upstream instance URL.
     #[serde(default = "default_searxng_url")]
     pub searxng_url: String,
 
-    /// Proxy pool for engine requests (round-robin rotation).
     #[serde(default)]
     pub proxy_urls: Vec<String>,
 
-    /// Default ranking strategy name (e.g. "bm25", "tfidf", "position_only").
     #[serde(default = "default_strategy")]
     pub strategy: String,
 }
@@ -80,7 +76,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load config from a TOML file. Falls back to defaults if the file doesn't exist.
+    /// Falls back to defaults if the file doesn't exist.
     pub fn load(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(content) => toml::from_str(&content).unwrap_or_default(),
@@ -88,7 +84,6 @@ impl Config {
         }
     }
 
-    /// Build a [`ProxyManager`] from the configured proxy URLs.
     pub fn proxy_manager(&self) -> ProxyManager {
         ProxyManager::new(self.proxy_urls.clone())
     }

@@ -1,4 +1,4 @@
-//! Search aggregation: fan out queries to engines, dedup, score, sort.
+//! Search aggregation: fan out, dedup, score, sort.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -12,14 +12,7 @@ use crate::models::query::SearchQuery;
 use crate::models::result::{EngineErrorInfo, RawSearchResult, SearchResponse, SearchResult};
 use crate::ranking::RankingStrategy;
 
-/// Aggregate search results from multiple engines.
-///
-/// 1. Skips suspended engines
-/// 2. Spawns an async task per engine via JoinSet
-/// 3. Collects results, deduplicates by normalized URL
-/// 4. Scores each result using the provided ranking strategy
-/// 5. Sorts by score descending
-/// 6. Records success/error for suspension tracking
+/// Fan out to non-suspended engines, dedup by URL, score with `strategy`, sort.
 pub async fn aggregate(
     query: &SearchQuery,
     registry: &EngineRegistry,
@@ -56,7 +49,7 @@ pub async fn aggregate(
         });
     }
 
-    // url -> (raw_result, engines, weight)
+    // url -> (raw_result, engines, max_weight)
     let mut dedup_map: HashMap<String, (RawSearchResult, Vec<String>, f32)> = HashMap::new();
     let mut errors: Vec<EngineErrorInfo> = Vec::new();
 
@@ -64,7 +57,6 @@ pub async fn aggregate(
         match result {
             Ok(raw_results) => {
                 suspension.record_success(&engine_name);
-                // Find the engine weight
                 let engine_weight = engines
                     .iter()
                     .find(|e| e.name() == engine_name)
@@ -98,7 +90,6 @@ pub async fn aggregate(
         }
     }
 
-    // Score and sort using the provided strategy
     let mut results: Vec<SearchResult> = dedup_map
         .into_iter()
         .map(|(_, (raw, engines, weight))| {
@@ -110,8 +101,6 @@ pub async fn aggregate(
         .collect();
 
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Apply max_results
     results.truncate(query.max_results);
 
     Ok(SearchResponse {
@@ -122,7 +111,6 @@ pub async fn aggregate(
     })
 }
 
-/// Select engines based on the query, skipping suspended ones.
 fn select_engines(
     _query: &SearchQuery,
     registry: &EngineRegistry,

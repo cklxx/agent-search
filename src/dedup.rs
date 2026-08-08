@@ -2,12 +2,8 @@
 
 use url::Url;
 
-/// Normalize a URL for deduplication.
-///
-/// - Lowercases the host
-/// - Removes tracking parameters (utm_*, fbclid, gclid, etc.)
-/// - Removes trailing slashes from the path
-/// - Removes fragments
+/// Lowercases host, strips tracking params (utm_*, fbclid, ...),
+/// removes trailing slash and fragment.
 pub fn normalize_url(raw: &str) -> String {
     let parsed = match Url::parse(raw) {
         Ok(u) => u,

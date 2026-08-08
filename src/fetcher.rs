@@ -1,12 +1,8 @@
-//! Web page content fetcher for agents.
-//!
-//! Fetches full page content and extracts main text,
-//! which is more useful for LLMs than just snippets.
+//! Fetch web pages and extract main text for LLM consumption.
 
 use reqwest::Client;
 use scraper::{Html, Selector};
 
-/// Fetched page content.
 #[derive(Debug, Clone)]
 pub struct FetchedContent {
     pub url: String,
@@ -15,7 +11,6 @@ pub struct FetchedContent {
     pub fetched_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Fetch a URL and extract the main text content.
 pub async fn fetch_content(url: &str) -> Result<FetchedContent, reqwest::Error> {
     let client = Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -26,7 +21,6 @@ pub async fn fetch_content(url: &str) -> Result<FetchedContent, reqwest::Error> 
 
     let doc = Html::parse_document(&body);
 
-    // Extract title
     let title_selector = Selector::parse("title").unwrap();
     let title = doc
         .select(&title_selector)
@@ -34,7 +28,6 @@ pub async fn fetch_content(url: &str) -> Result<FetchedContent, reqwest::Error> 
         .map(|e| e.text().collect::<String>().trim().to_string())
         .unwrap_or_default();
 
-    // Extract main content
     let content = extract_main_text(&doc);
 
     Ok(FetchedContent {
@@ -45,24 +38,11 @@ pub async fn fetch_content(url: &str) -> Result<FetchedContent, reqwest::Error> 
     })
 }
 
-/// Extract the main text content from an HTML document.
-///
-/// Strategy:
-/// 1. Remove script, style, nav, header, footer elements
-/// 2. Find the element with the most text content
-/// 3. Extract text from that element
+/// Extract main text: try article/main selectors, then paragraphs, then body.
 fn extract_main_text(doc: &Html) -> String {
-    // Try common content selectors first
     let content_selectors = [
-        "article",
-        "main",
-        "[role='main']",
-        ".content",
-        ".post-content",
-        ".article-content",
-        ".entry-content",
-        "#content",
-        ".markdown-body",
+        "article", "main", "[role='main']", ".content", ".post-content",
+        ".article-content", ".entry-content", "#content", ".markdown-body",
     ];
 
     for selector in &content_selectors {
@@ -76,7 +56,6 @@ fn extract_main_text(doc: &Html) -> String {
         }
     }
 
-    // Fallback: find the paragraph with the most text
     if let Ok(p_selector) = Selector::parse("p") {
         let paragraphs: Vec<String> = doc
             .select(&p_selector)
@@ -89,24 +68,20 @@ fn extract_main_text(doc: &Html) -> String {
         }
     }
 
-    // Last resort: extract all text
     let body_selector = Selector::parse("body").unwrap();
     if let Some(body) = doc.select(&body_selector).next() {
-        let text = body.text().collect::<String>();
-        return clean_text(&text);
+        return clean_text(&body.text().collect::<String>());
     }
 
     String::new()
 }
 
-/// Clean up extracted text: remove excessive whitespace.
 fn clean_text(text: &str) -> String {
-    let lines: Vec<&str> = text
-        .lines()
+    text.lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
-        .collect();
-    lines.join("\n")
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

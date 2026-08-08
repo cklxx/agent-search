@@ -1,10 +1,7 @@
-//! Declarative engine configuration.
+//! Declarative engine configuration (YAML).
 //!
-//! Supports two engine types:
-//! - `html`: CSS selector-based scraping
-//! - `json`: JSON API field mapping
-//!
-//! This allows adding engines via YAML config without writing Rust code.
+//! Two engine types: `html` (CSS selectors) and `json` (field mapping).
+//! Adding an engine only requires a YAML entry — no Rust code.
 
 use std::collections::HashMap;
 

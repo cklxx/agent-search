@@ -1,11 +1,8 @@
-//! Proxy pool manager with round-robin rotation.
+//! Round-robin proxy pool.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Manages a pool of proxy URLs and hands them out in round-robin order.
-///
-/// Cloning is cheap: the URL list is shared behind an `Arc`, and the
-/// round-robin counter is atomic so all clones share the same position.
+/// Proxy pool with atomic round-robin counter. Clones share the same state.
 #[derive(Clone)]
 pub struct ProxyManager {
     urls: std::sync::Arc<Vec<String>>,
@@ -13,8 +10,6 @@ pub struct ProxyManager {
 }
 
 impl ProxyManager {
-    /// Create a new proxy manager from a list of proxy URLs.
-    ///
     /// Empty URLs are filtered out.
     pub fn new(urls: Vec<String>) -> Self {
         let urls: Vec<String> = urls.into_iter().filter(|u| !u.trim().is_empty()).collect();
@@ -24,24 +19,19 @@ impl ProxyManager {
         }
     }
 
-    /// Returns true if the proxy pool is empty.
     pub fn is_empty(&self) -> bool {
         self.urls.is_empty()
     }
 
-    /// Number of proxies in the pool.
     pub fn len(&self) -> usize {
         self.urls.len()
     }
 
-    /// The list of proxy URLs.
     pub fn urls(&self) -> &[String] {
         &self.urls
     }
 
-    /// Return the next proxy URL in round-robin order.
-    ///
-    /// Returns `None` if the pool is empty.
+    /// Next proxy URL in round-robin order. `None` if pool is empty.
     pub fn next(&self) -> Option<&str> {
         if self.urls.is_empty() {
             return None;
@@ -50,10 +40,7 @@ impl ProxyManager {
         Some(self.urls[idx].as_str())
     }
 
-    /// Return the index of the next proxy in round-robin order.
-    ///
-    /// Useful for indexing into a pre-built client array aligned with [`urls`].
-    /// Returns `None` if the pool is empty.
+    /// Index of the next proxy, for aligning with a pre-built client array.
     pub fn next_index(&self) -> Option<usize> {
         if self.urls.is_empty() {
             return None;
@@ -87,7 +74,7 @@ mod tests {
         assert_eq!(pm.next(), Some("a"));
         assert_eq!(pm.next(), Some("b"));
         assert_eq!(pm.next(), Some("c"));
-        assert_eq!(pm.next(), Some("a")); // wraps around
+        assert_eq!(pm.next(), Some("a"));
     }
 
     #[test]

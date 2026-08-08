@@ -1,8 +1,7 @@
-//! Error types for the search engine.
+//! Error types.
 
 use thiserror::Error;
 
-/// Errors that can occur during search operations.
 #[derive(Error, Debug)]
 pub enum SearchError {
     #[error("engine request failed: {0}")]
@@ -46,5 +45,4 @@ impl From<serde_json::Error> for SearchError {
     }
 }
 
-/// Result type alias for engine operations.
 pub type EngineResult<T> = Result<T, SearchError>;

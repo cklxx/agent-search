@@ -1,4 +1,4 @@
-//! HTTP routes for the search API.
+//! HTTP routes.
 
 use std::sync::Arc;
 
@@ -17,7 +17,6 @@ use crate::index::LocalIndex;
 use crate::models::query::SearchQuery;
 use crate::ranking::{RankingStrategy, get_strategy, strategy_names};
 
-/// Application state shared across requests.
 #[derive(Clone)]
 pub struct AppState {
     pub registry: Arc<EngineRegistry>,
@@ -34,12 +33,10 @@ pub async fn search(
 ) -> impl IntoResponse {
     let key = cache_key(&query.query, query.page, query.max_results);
 
-    // Check cache
     if let Some(cached) = state.cache.get(&key).await {
         return (StatusCode::OK, Json((*cached).clone())).into_response();
     }
 
-    // Try local index first
     if let Some(local_results) = state.local_index.search_cached(&query.query) {
         let response = crate::models::result::SearchResponse {
             query: query.query.clone(),
@@ -54,7 +51,6 @@ pub async fn search(
 
     match aggregator::aggregate(&query, &state.registry, &state.suspension, state.strategy.as_ref()).await {
         Ok(response) => {
-            // Index results for future queries
             let _ = state.local_index.cache_results(&query.query, &response.results);
             let response = Arc::new(response);
             state.cache.insert(key, response.clone()).await;
@@ -68,10 +64,9 @@ pub async fn search(
     }
 }
 
-/// POST /search/ab — run two ranking strategies side-by-side.
+/// POST /search/ab — run two strategies side-by-side.
 ///
-/// Body: `{"query": "...", "strategy_a": "bm25", "strategy_b": "tfidf", "max_results": 10}`
-/// Returns both ranked result lists for comparison.
+/// Body: `{"query": "...", "strategy_a": "bm25", "strategy_b": "tfidf"}`
 pub async fn search_ab(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -87,19 +82,9 @@ pub async fn search_ab(
         }
     };
 
-    let strategy_a_name = body
-        .get("strategy_a")
-        .and_then(|v| v.as_str())
-        .unwrap_or("bm25");
-    let strategy_b_name = body
-        .get("strategy_b")
-        .and_then(|v| v.as_str())
-        .unwrap_or("tfidf");
-
-    let max_results = body
-        .get("max_results")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(10) as usize;
+    let strategy_a_name = body.get("strategy_a").and_then(|v| v.as_str()).unwrap_or("bm25");
+    let strategy_b_name = body.get("strategy_b").and_then(|v| v.as_str()).unwrap_or("tfidf");
+    let max_results = body.get("max_results").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let query = SearchQuery {
         query: query_str,
@@ -110,19 +95,14 @@ pub async fn search_ab(
     let strategy_a = get_strategy(strategy_a_name);
     let strategy_b = get_strategy(strategy_b_name);
 
-    // Run both strategies on the same engine results
-    // We run aggregator twice — once per strategy.
-    // (In production you'd share the raw results; here simplicity wins.)
+    // Run aggregator twice (once per strategy). Simpler than sharing raw results.
     let resp_a = aggregator::aggregate(&query, &state.registry, &state.suspension, strategy_a.as_ref()).await;
     let resp_b = aggregator::aggregate(&query, &state.registry, &state.suspension, strategy_b.as_ref()).await;
 
     match (resp_a, resp_b) {
         (Ok(a), Ok(b)) => {
-            // Compute overlap between the two result sets
-            let urls_a: std::collections::HashSet<&str> =
-                a.results.iter().map(|r| r.url.as_str()).collect();
-            let urls_b: std::collections::HashSet<&str> =
-                b.results.iter().map(|r| r.url.as_str()).collect();
+            let urls_a: std::collections::HashSet<&str> = a.results.iter().map(|r| r.url.as_str()).collect();
+            let urls_b: std::collections::HashSet<&str> = b.results.iter().map(|r| r.url.as_str()).collect();
             let overlap = urls_a.intersection(&urls_b).count();
 
             (
@@ -147,13 +127,9 @@ pub async fn search_ab(
     }
 }
 
-/// GET /strategies — list available ranking strategies.
+/// GET /strategies
 pub async fn list_strategies() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"strategies": strategy_names()})),
-    )
-        .into_response()
+    (StatusCode::OK, Json(serde_json::json!({"strategies": strategy_names()}))).into_response()
 }
 
 /// GET /engines
@@ -167,7 +143,7 @@ pub async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
 }
 
-/// POST /search/stream — streaming search results via SSE.
+/// POST /search/stream — SSE stream of results.
 pub async fn search_stream(
     State(state): State<AppState>,
     Json(query): Json<SearchQuery>,
@@ -200,9 +176,7 @@ pub async fn search_stream(
     Sse::new(stream)
 }
 
-/// GET /content?url=...
-///
-/// Fetch the full content of a URL and return extracted text.
+/// GET /content?url=... — fetch and extract page text.
 pub async fn fetch_content(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
