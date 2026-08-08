@@ -30,6 +30,14 @@ pub struct Config {
     /// Proxy pool for engine requests (round-robin rotation).
     #[serde(default)]
     pub proxy_urls: Vec<String>,
+
+    /// Default ranking strategy name (e.g. "bm25", "tfidf", "position_only").
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
+}
+
+fn default_strategy() -> String {
+    "bm25".to_string()
 }
 
 fn default_searxng_url() -> String {
@@ -66,6 +74,7 @@ impl Default for Config {
             cache_ttl_secs: default_cache_ttl(),
             searxng_url: default_searxng_url(),
             proxy_urls: Vec::new(),
+            strategy: default_strategy(),
         }
     }
 }

@@ -10,20 +10,21 @@ use crate::engine::{EngineRef, EngineRegistry, EngineSuspensionManager};
 use crate::models::error::{EngineResult, SearchError};
 use crate::models::query::SearchQuery;
 use crate::models::result::{EngineErrorInfo, RawSearchResult, SearchResponse, SearchResult};
-use crate::ranking::score_result;
+use crate::ranking::RankingStrategy;
 
 /// Aggregate search results from multiple engines.
 ///
 /// 1. Skips suspended engines
 /// 2. Spawns an async task per engine via JoinSet
 /// 3. Collects results, deduplicates by normalized URL
-/// 4. Scores each result (TF + position + engine weight)
+/// 4. Scores each result using the provided ranking strategy
 /// 5. Sorts by score descending
 /// 6. Records success/error for suspension tracking
 pub async fn aggregate(
     query: &SearchQuery,
     registry: &EngineRegistry,
     suspension: &EngineSuspensionManager,
+    strategy: &dyn RankingStrategy,
 ) -> EngineResult<SearchResponse> {
     let engines = select_engines(query, registry, suspension);
 
@@ -97,11 +98,11 @@ pub async fn aggregate(
         }
     }
 
-    // Score and sort
+    // Score and sort using the provided strategy
     let mut results: Vec<SearchResult> = dedup_map
         .into_iter()
         .map(|(_, (raw, engines, weight))| {
-            let mut scored = score_result(raw, query, weight);
+            let mut scored = strategy.rank(raw, query, weight);
             scored.engine = engines[0].clone();
             scored.engines = engines;
             scored

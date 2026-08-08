@@ -15,6 +15,7 @@ use crate::cache::{QueryCache, cache_key};
 use crate::engine::{EngineRegistry, EngineSuspensionManager};
 use crate::index::LocalIndex;
 use crate::models::query::SearchQuery;
+use crate::ranking::{RankingStrategy, get_strategy, strategy_names};
 
 /// Application state shared across requests.
 #[derive(Clone)]
@@ -23,6 +24,7 @@ pub struct AppState {
     pub cache: QueryCache,
     pub suspension: Arc<EngineSuspensionManager>,
     pub local_index: Arc<LocalIndex>,
+    pub strategy: Arc<dyn RankingStrategy>,
 }
 
 /// POST /search
@@ -50,7 +52,7 @@ pub async fn search(
         return (StatusCode::OK, Json((*response).clone())).into_response();
     }
 
-    match aggregator::aggregate(&query, &state.registry, &state.suspension).await {
+    match aggregator::aggregate(&query, &state.registry, &state.suspension, state.strategy.as_ref()).await {
         Ok(response) => {
             // Index results for future queries
             let _ = state.local_index.cache_results(&query.query, &response.results);
@@ -64,6 +66,94 @@ pub async fn search(
         )
             .into_response(),
     }
+}
+
+/// POST /search/ab — run two ranking strategies side-by-side.
+///
+/// Body: `{"query": "...", "strategy_a": "bm25", "strategy_b": "tfidf", "max_results": 10}`
+/// Returns both ranked result lists for comparison.
+pub async fn search_ab(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let query_str = match body.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "query is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    let strategy_a_name = body
+        .get("strategy_a")
+        .and_then(|v| v.as_str())
+        .unwrap_or("bm25");
+    let strategy_b_name = body
+        .get("strategy_b")
+        .and_then(|v| v.as_str())
+        .unwrap_or("tfidf");
+
+    let max_results = body
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10) as usize;
+
+    let query = SearchQuery {
+        query: query_str,
+        max_results,
+        ..Default::default()
+    };
+
+    let strategy_a = get_strategy(strategy_a_name);
+    let strategy_b = get_strategy(strategy_b_name);
+
+    // Run both strategies on the same engine results
+    // We run aggregator twice — once per strategy.
+    // (In production you'd share the raw results; here simplicity wins.)
+    let resp_a = aggregator::aggregate(&query, &state.registry, &state.suspension, strategy_a.as_ref()).await;
+    let resp_b = aggregator::aggregate(&query, &state.registry, &state.suspension, strategy_b.as_ref()).await;
+
+    match (resp_a, resp_b) {
+        (Ok(a), Ok(b)) => {
+            // Compute overlap between the two result sets
+            let urls_a: std::collections::HashSet<&str> =
+                a.results.iter().map(|r| r.url.as_str()).collect();
+            let urls_b: std::collections::HashSet<&str> =
+                b.results.iter().map(|r| r.url.as_str()).collect();
+            let overlap = urls_a.intersection(&urls_b).count();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "query": query.query,
+                    "strategy_a": strategy_a_name,
+                    "strategy_b": strategy_b_name,
+                    "results_a": a.results,
+                    "results_b": b.results,
+                    "overlap": overlap,
+                    "overlap_ratio": overlap as f64 / urls_a.len().max(1) as f64,
+                })),
+            )
+                .into_response()
+        }
+        (Err(e), _) | (_, Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /strategies — list available ranking strategies.
+pub async fn list_strategies() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"strategies": strategy_names()})),
+    )
+        .into_response()
 }
 
 /// GET /engines
@@ -86,9 +176,10 @@ pub async fn search_stream(
     let tx_clone = tx.clone();
     let registry = state.registry.clone();
     let suspension = state.suspension.clone();
+    let strategy = state.strategy.clone();
 
     tokio::spawn(async move {
-        let response = aggregator::aggregate(&query, &registry, &suspension).await;
+        let response = aggregator::aggregate(&query, &registry, &suspension, strategy.as_ref()).await;
         match response {
             Ok(resp) => {
                 for result in resp.results {

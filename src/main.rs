@@ -11,7 +11,8 @@ use agent_search::config::Config;
 use agent_search::engine::engines::builtin_registry;
 use agent_search::engine::EngineSuspensionManager;
 use agent_search::index::LocalIndex;
-use agent_search::routes::{AppState, fetch_content, health, list_engines, search, search_stream};
+use agent_search::ranking::get_strategy;
+use agent_search::routes::{AppState, fetch_content, health, list_engines, list_strategies, search, search_ab, search_stream};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,17 +39,24 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| LocalIndex::new_in_ram().expect("failed to create in-memory index")),
     );
 
+    // Default ranking strategy from config
+    let strategy = get_strategy(&config.strategy);
+    tracing::info!("ranking strategy: {}", strategy.name());
+
     let state = AppState {
         registry: Arc::new(registry),
         cache,
         suspension,
         local_index,
+        strategy: Arc::from(strategy),
     };
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/engines", get(list_engines))
+        .route("/strategies", get(list_strategies))
         .route("/search", post(search))
+        .route("/search/ab", post(search_ab))
         .route("/search/stream", post(search_stream))
         .route("/content", get(fetch_content))
         .layer(CorsLayer::permissive())
