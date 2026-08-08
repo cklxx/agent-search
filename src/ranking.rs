@@ -283,7 +283,9 @@ impl RankingStrategy for BgeRerankerStrategy {
     }
 
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, _engine_weight: f32, _engines: &[String]) -> f32 {
-        let document = format!("{} {}", raw.title, raw.snippet);
+        // Include URL path tokens — they often carry query-relevant keywords
+        // (e.g. /rust/async-runtime). Title + snippet cover the content.
+        let document = format!("{} {} {}", raw.title, raw.url, raw.snippet);
         let mut reranker = match self.reranker.lock() {
             Ok(r) => r,
             Err(_) => return 0.0,
