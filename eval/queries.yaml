@@ -1,0 +1,161 @@
+# AB evaluation query set — technical & academic focus
+#
+# Each query has expected keywords/domains for relevance scoring.
+# Used to compare ranking strategies (BM25 weights, engine weights, etc.).
+
+queries:
+  # --- Programming Languages ---
+  - query: "rust async runtime tokio"
+    category: programming
+    expected_keywords: ["tokio", "async", "runtime", "future", "await"]
+    expected_domains: ["tokio.rs", "rust-lang.org", "docs.rs"]
+
+  - query: "python decorator metaclass"
+    category: programming
+    expected_keywords: ["decorator", "metaclass", "python", "wrapper"]
+    expected_domains: ["python.org", "realpython.com", "stackoverflow.com"]
+
+  - query: "go goroutine channel concurrency"
+    category: programming
+    expected_keywords: ["goroutine", "channel", "concurrency", "go"]
+    expected_domains: ["go.dev", "golang.org", "stackoverflow.com"]
+
+  - query: "rust borrow checker lifetime"
+    category: programming
+    expected_keywords: ["borrow", "lifetime", "rust", "ownership"]
+    expected_domains: ["rust-lang.org", "doc.rust-lang.org"]
+
+  - query: "typescript generics conditional types"
+    category: programming
+    expected_keywords: ["typescript", "generics", "conditional", "type"]
+    expected_domains: ["typescriptlang.org", "stackoverflow.com"]
+
+  # --- Algorithms & Data Structures ---
+  - query: "binary search tree AVL red-black"
+    category: algorithms
+    expected_keywords: ["binary search", "AVL", "red-black", "tree"]
+    expected_domains: ["wikipedia.org", "geeksforgeeks.org"]
+
+  - query: "dynamic programming knapsack problem"
+    category: algorithms
+    expected_keywords: ["dynamic programming", "knapsack", "DP"]
+    expected_domains: ["wikipedia.org", "stackoverflow.com"]
+
+  - query: "graph traversal BFS DFS algorithm"
+    category: algorithms
+    expected_keywords: ["BFS", "DFS", "graph", "traversal"]
+    expected_domains: ["wikipedia.org", "stackoverflow.com"]
+
+  - query: "hash table collision resolution chaining"
+    category: algorithms
+    expected_keywords: ["hash", "collision", "chaining", "table"]
+    expected_domains: ["wikipedia.org", "stackoverflow.com"]
+
+  - query: "sorting algorithm comparison quicksort mergesort"
+    category: algorithms
+    expected_keywords: ["quicksort", "mergesort", "sorting", "complexity"]
+    expected_domains: ["wikipedia.org", "stackoverflow.com"]
+
+  # --- Systems & Networking ---
+  - query: "docker networking bridge overlay"
+    category: systems
+    expected_keywords: ["docker", "network", "bridge", "overlay"]
+    expected_domains: ["docs.docker.com", "stackoverflow.com"]
+
+  - query: "kubernetes pod deployment service"
+    category: systems
+    expected_keywords: ["kubernetes", "pod", "deployment", "service"]
+    expected_domains: ["kubernetes.io", "stackoverflow.com"]
+
+  - query: "TCP congestion control Reno BBR"
+    category: systems
+    expected_keywords: ["TCP", "congestion", "Reno", "BBR"]
+    expected_domains: ["wikipedia.org", "rfc-editor.org"]
+
+  - query: "CAP theorem distributed systems consistency"
+    category: systems
+    expected_keywords: ["CAP", "consistency", "availability", "partition"]
+    expected_domains: ["wikipedia.org", "stackoverflow.com"]
+
+  - query: "git rebase merge conflict resolution"
+    category: systems
+    expected_keywords: ["git", "rebase", "merge", "conflict"]
+    expected_domains: ["git-scm.com", "stackoverflow.com"]
+
+  # --- AI & Machine Learning ---
+  - query: "transformer architecture attention mechanism"
+    category: ai
+    expected_keywords: ["transformer", "attention", "self-attention", "encoder", "decoder"]
+    expected_domains: ["arxiv.org", "wikipedia.org", "towardsdatascience.com"]
+
+  - query: "BERT pretraining masked language model"
+    category: ai
+    expected_keywords: ["BERT", "pretraining", "masked", "language model"]
+    expected_domains: ["arxiv.org", "huggingface.co"]
+
+  - query: "diffusion model denoising score matching"
+    category: ai
+    expected_keywords: ["diffusion", "denoising", "score matching"]
+    expected_domains: ["arxiv.org", "wikipedia.org"]
+
+  - query: "reinforcement learning policy gradient PPO"
+    category: ai
+    expected_keywords: ["reinforcement learning", "policy gradient", "PPO"]
+    expected_domains: ["arxiv.org", "stackoverflow.com"]
+
+  - query: "vector embedding similarity search FAISS"
+    category: ai
+    expected_keywords: ["embedding", "vector", "similarity", "FAISS"]
+    expected_domains: ["arxiv.org", "github.com"]
+
+  # --- Science & Mathematics ---
+  - query: "quantum computing qubit superposition entanglement"
+    category: science
+    expected_keywords: ["quantum", "qubit", "superposition", "entanglement"]
+    expected_domains: ["wikipedia.org", "arxiv.org"]
+
+  - query: "CRISPR Cas9 gene editing mechanism"
+    category: science
+    expected_keywords: ["CRISPR", "Cas9", "gene editing"]
+    expected_domains: ["wikipedia.org", "nature.com", "ncbi.nlm.nih.gov"]
+
+  - query: "Bayesian inference posterior probability MCMC"
+    category: science
+    expected_keywords: ["Bayesian", "posterior", "MCMC", "probability"]
+    expected_domains: ["wikipedia.org", "stackoverflow.com"]
+
+  - query: "P vs NP problem computational complexity"
+    category: science
+    expected_keywords: ["P vs NP", "complexity", "computational"]
+    expected_domains: ["wikipedia.org", "stackoverflow.com"]
+
+  - query: "general relativity spacetime curvature Einstein"
+    category: science
+    expected_keywords: ["relativity", "spacetime", "curvature", "Einstein"]
+    expected_domains: ["wikipedia.org", "arxiv.org"]
+
+  # --- Tools & Frameworks ---
+  - query: "react hooks useEffect useState"
+    category: tools
+    expected_keywords: ["react", "hooks", "useEffect", "useState"]
+    expected_domains: ["react.dev", "stackoverflow.com"]
+
+  - query: "postgresql indexing B-tree GIN"
+    category: tools
+    expected_keywords: ["postgresql", "index", "B-tree", "GIN"]
+    expected_domains: ["postgresql.org", "stackoverflow.com"]
+
+  - query: "linux systemd service unit file"
+    category: tools
+    expected_keywords: ["systemd", "service", "unit", "linux"]
+    expected_domains: ["freedesktop.org", "stackoverflow.com"]
+
+  - query: "nginx reverse proxy configuration"
+    category: tools
+    expected_keywords: ["nginx", "reverse proxy", "configuration"]
+    expected_domains: ["nginx.org", "stackoverflow.com"]
+
+  - query: "CI CD pipeline GitHub Actions workflow"
+    category: tools
+    expected_keywords: ["CI", "CD", "GitHub Actions", "pipeline"]
+    expected_domains: ["docs.github.com", "stackoverflow.com"]
