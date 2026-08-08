@@ -19,13 +19,5 @@ pub trait SearchEngine: Send + Sync {
         1.0
     }
 
-    fn supports(&self, _query: &SearchQuery) -> bool {
-        true
-    }
-
     async fn search(&self, query: &SearchQuery) -> EngineResult<Vec<RawSearchResult>>;
-
-    async fn health_check(&self) -> bool {
-        true
-    }
 }

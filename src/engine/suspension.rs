@@ -10,7 +10,6 @@ use crate::models::error::SearchError;
 pub struct SuspendedStatus {
     pub continuous_errors: u32,
     pub suspend_end_time: Option<Instant>,
-    pub suspend_reason: String,
 }
 
 impl SuspendedStatus {
@@ -20,22 +19,15 @@ impl SuspendedStatus {
             .unwrap_or(false)
     }
 
-    pub fn remaining(&self) -> Option<Duration> {
-        self.suspend_end_time
-            .map(|end| end.saturating_duration_since(Instant::now()))
-    }
-
-    pub fn suspend(&mut self, duration: Duration, reason: &str) {
+    pub fn suspend(&mut self, duration: Duration) {
         self.continuous_errors += 1;
         self.suspend_end_time = Some(Instant::now() + duration);
-        self.suspend_reason = reason.to_string();
     }
 
     /// Reset on successful response.
     pub fn resume(&mut self) {
         self.continuous_errors = 0;
         self.suspend_end_time = None;
-        self.suspend_reason.clear();
     }
 }
 
@@ -69,15 +61,6 @@ impl EngineSuspensionManager {
             .unwrap_or(false)
     }
 
-    pub fn suspend_reason(&self, engine_name: &str) -> String {
-        self.statuses
-            .lock()
-            .unwrap()
-            .get(engine_name)
-            .map(|s| s.suspend_reason.clone())
-            .unwrap_or_default()
-    }
-
     pub fn record_success(&self, engine_name: &str) {
         if let Some(status) = self.statuses.lock().unwrap().get_mut(engine_name) {
             status.resume();
@@ -92,7 +75,7 @@ impl EngineSuspensionManager {
         let duration = suspension_duration(error, status.continuous_errors, self.ban_time_on_fail, self.max_ban_time_on_fail);
 
         if let Some(dur) = duration {
-            status.suspend(dur, &error.to_string());
+            status.suspend(dur);
             Some(dur)
         } else {
             status.continuous_errors += 1;
@@ -138,7 +121,7 @@ mod tests {
         let mut status = SuspendedStatus::default();
         assert!(!status.is_suspended());
 
-        status.suspend(Duration::from_secs(60), "test");
+        status.suspend(Duration::from_secs(60));
         assert!(status.is_suspended());
         assert_eq!(status.continuous_errors, 1);
 

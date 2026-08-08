@@ -42,7 +42,6 @@ pub async fn search(
             query: query.query.clone(),
             results: local_results,
             errors: Vec::new(),
-            answer: None,
         };
         let response = Arc::new(response);
         state.cache.insert(key, response.clone()).await;

@@ -102,7 +102,6 @@ impl LocalIndex {
                 title,
                 url,
                 snippet,
-                content: None,
                 published_date: None,
                 score,
                 engine: engine.clone(),

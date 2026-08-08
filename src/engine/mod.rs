@@ -30,14 +30,6 @@ impl EngineRegistry {
         self.engines.insert(engine.name().to_string(), engine);
     }
 
-    pub fn get(&self, name: &str) -> Option<EngineRef> {
-        self.engines.get(name).cloned()
-    }
-
-    pub fn all(&self) -> Vec<EngineRef> {
-        self.engines.values().cloned().collect()
-    }
-
     pub fn by_category(&self, category: &str) -> Vec<EngineRef> {
         self.engines
             .values()
@@ -48,10 +40,5 @@ impl EngineRegistry {
 
     pub fn names(&self) -> Vec<String> {
         self.engines.keys().cloned().collect()
-    }
-
-    /// Engine weight by name, or 1.0 if not registered.
-    pub fn get_weight(&self, name: &str) -> f32 {
-        self.engines.get(name).map(|e| e.weight()).unwrap_or(1.0)
     }
 }

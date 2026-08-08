@@ -191,29 +191,21 @@ pub struct JsonQueries {
 impl EngineConfig {
     /// Build the search URL from the template and query parameters.
     pub fn build_url(&self, query: &str, page: u32, language: &Option<String>, time_range: &Option<String>, safe_search: u8) -> String {
-        let pageno = if self.paging {
-            if page == 0 && !self.send_page_num_on_first_page {
-                self.first_page_num
-            } else {
-                self.first_page_num + page
-            }
-        } else {
+        let pageno = if !self.paging || (page == 0 && !self.send_page_num_on_first_page) {
             self.first_page_num
+        } else {
+            self.first_page_num + page
         };
 
         let lang = language.as_deref().unwrap_or(&self.lang_all);
         let lang = if lang == "all" { &self.lang_all } else { lang };
 
         let time_range_str = if self.time_range_support {
-            if let Some(tr) = time_range {
-                if let Some(val) = self.time_range_map.get(tr) {
-                    self.time_range_url.replace("{time_range_val}", val)
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
+            time_range
+                .as_ref()
+                .and_then(|tr| self.time_range_map.get(tr))
+                .map(|val| self.time_range_url.replace("{time_range_val}", val))
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -237,11 +229,5 @@ impl EngineConfig {
 pub fn load_engines_from_yaml(path: &std::path::Path) -> Result<Vec<EngineConfig>, String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let configs: Vec<EngineConfig> = serde_yaml::from_str(&content).map_err(|e| e.to_string())?;
-    Ok(configs)
-}
-
-/// Load engine configurations from a YAML string.
-pub fn load_engines_from_str(yaml: &str) -> Result<Vec<EngineConfig>, String> {
-    let configs: Vec<EngineConfig> = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
     Ok(configs)
 }

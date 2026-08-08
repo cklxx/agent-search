@@ -9,10 +9,6 @@ pub struct SearchResult {
     pub url: String,
     pub snippet: String,
 
-    /// Only present when `include_raw_content` is true.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub published_date: Option<DateTime<Utc>>,
 
@@ -48,6 +44,4 @@ pub struct SearchResponse {
     pub query: String,
     pub results: Vec<SearchResult>,
     pub errors: Vec<EngineErrorInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub answer: Option<String>,
 }

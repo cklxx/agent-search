@@ -13,7 +13,6 @@ pub trait RankingStrategy: Send + Sync {
             title: raw.title,
             url: raw.url,
             snippet: raw.snippet,
-            content: None,
             published_date: raw.published_date,
             score,
             engine: String::new(),

@@ -29,7 +29,6 @@ pub async fn aggregate(
                 engine: "system".to_string(),
                 error: "no engines available".to_string(),
             }],
-            answer: None,
         });
     }
 
@@ -107,7 +106,6 @@ pub async fn aggregate(
         query: query.query.clone(),
         results,
         errors,
-        answer: None,
     })
 }
 
