@@ -60,6 +60,7 @@ async-trait = "0.1"
 
 # Search / BM25 scoring
 tantivy = "0.22"
+fastembed = "5.17.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

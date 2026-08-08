@@ -15,9 +15,6 @@ pub struct SearchResult {
     /// Relevance score (0.0 - 1.0).
     pub score: f32,
 
-    /// Engine that returned this result.
-    pub engine: String,
-
     /// All engines that returned this result (after dedup merge).
     pub engines: Vec<String>,
 }

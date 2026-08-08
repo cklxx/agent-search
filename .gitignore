@@ -4,3 +4,4 @@ Cargo.lock
 config.local.toml
 .DS_Store
 /data/
+.fastembed_cache/

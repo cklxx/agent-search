@@ -57,13 +57,14 @@ impl LocalIndex {
         let mut index_writer: IndexWriter = self.index.writer(50_000_000)?;
 
         for result in results {
+            let engine = result.engines.first().cloned().unwrap_or_default();
             index_writer.add_document(doc!(
                 self.query_field => query.to_string(),
                 self.title_field => result.title.clone(),
                 self.url_field => result.url.clone(),
                 self.snippet_field => result.snippet.clone(),
                 self.score_field => result.score as f64,
-                self.engine_field => result.engine.clone(),
+                self.engine_field => engine,
             ))?;
         }
 
@@ -71,15 +72,15 @@ impl LocalIndex {
         Ok(())
     }
 
-    /// BM25 search across query, title, snippet, url fields.
+    /// BM25 search across the query field only.
+    /// Returns cached results for queries textually similar to `query`.
     pub fn search_cached(&self, query: &str) -> Option<Vec<SearchResult>> {
         let reader = self.index.reader().ok()?;
         let searcher = reader.searcher();
 
-        let query_parser = QueryParser::for_index(
-            &self.index,
-            vec![self.query_field, self.title_field, self.snippet_field, self.url_field],
-        );
+        // Search only on the query field — we want results cached for similar
+        // queries, not results whose content happens to share words.
+        let query_parser = QueryParser::for_index(&self.index, vec![self.query_field]);
         let parsed_query = query_parser.parse_query(query).ok()?;
 
         let top_docs = searcher
@@ -104,7 +105,6 @@ impl LocalIndex {
                 snippet,
                 published_date: None,
                 score,
-                engine: engine.clone(),
                 engines: vec![engine],
             });
         }

@@ -84,31 +84,24 @@ impl EngineSuspensionManager {
     }
 }
 
-/// 403/429: 180s, CAPTCHA: 1h, Cloudflare: 1d, others: exponential backoff.
+/// 403/429: 180s, others: exponential backoff.
 fn suspension_duration(
     error: &SearchError,
     continuous_errors: u32,
     ban_time: Duration,
     max_ban_time: Duration,
 ) -> Option<Duration> {
+    let exponential = || {
+        let exponent = continuous_errors.min(10);
+        (ban_time * 2u32.pow(exponent)).min(max_ban_time)
+    };
+
     match error {
         SearchError::Timeout => None,
-        SearchError::Request(msg) => {
-            if msg.contains("403") || msg.contains("429") {
-                Some(Duration::from_secs(180))
-            } else if msg.to_lowercase().contains("captcha") {
-                Some(Duration::from_secs(3600))
-            } else if msg.to_lowercase().contains("cloudflare") {
-                Some(Duration::from_secs(86400))
-            } else {
-                let exponent = continuous_errors.min(10);
-                Some((ban_time * 2u32.pow(exponent)).min(max_ban_time))
-            }
+        SearchError::HttpStatus(403) | SearchError::HttpStatus(429) => {
+            Some(Duration::from_secs(180))
         }
-        _ => {
-            let exponent = continuous_errors.min(10);
-            Some((ban_time * 2u32.pow(exponent)).min(max_ban_time))
-        }
+        _ => Some(exponential()),
     }
 }
 
@@ -144,7 +137,7 @@ mod tests {
     #[test]
     fn test_403_suspension() {
         let duration = suspension_duration(
-            &SearchError::Request("HTTP 403".to_string()),
+            &SearchError::HttpStatus(403),
             0,
             Duration::from_secs(5),
             Duration::from_secs(120),

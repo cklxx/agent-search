@@ -8,8 +8,8 @@ use crate::models::result::RawSearchResult;
 
 #[async_trait]
 pub trait SearchEngine: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn categories(&self) -> &[&'static str];
+    fn name(&self) -> &str;
+    fn categories(&self) -> &[String];
 
     fn timeout(&self) -> u64 {
         10

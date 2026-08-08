@@ -33,7 +33,7 @@ impl EngineRegistry {
     pub fn by_category(&self, category: &str) -> Vec<EngineRef> {
         self.engines
             .values()
-            .filter(|e| e.categories().contains(&category))
+            .filter(|e| e.categories().iter().any(|c| c == category))
             .cloned()
             .collect()
     }

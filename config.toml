@@ -3,15 +3,12 @@
 host = "127.0.0.1"
 port = 8080
 
-# Per-engine request timeout in seconds
-request_timeout = 10
-
 # Query cache
 cache_size = 1000
 cache_ttl_secs = 30
 
-# SearXNG upstream instance
-searxng_url = "http://127.0.0.1:39217"
+# Ranking strategy: bm25, tfidf, position_only, engine_weight, bm25_title_boost, bge_reranker
+strategy = "bge_reranker"
 
 # Proxy pool for engine requests.
 # Proxies are rotated round-robin per request across all engines.

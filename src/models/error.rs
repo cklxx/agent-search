@@ -7,6 +7,9 @@ pub enum SearchError {
     #[error("engine request failed: {0}")]
     Request(String),
 
+    #[error("HTTP {0}")]
+    HttpStatus(u16),
+
     #[error("engine returned empty result set")]
     EmptyResultSet,
 
@@ -18,9 +21,6 @@ pub enum SearchError {
 
     #[error("timeout")]
     Timeout,
-
-    #[error("rate limited")]
-    RateLimited,
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

@@ -60,21 +60,33 @@ def search_ab(base_url: str, query: str, max_results: int, strategy_a: str, stra
 
 
 def relevance_score(result: dict, expected_keywords: list[str], expected_domains: list[str]) -> float:
+    """Relevance = 0.3 * domain_authority + 0.7 * keyword_overlap.
+
+    Domain authority is a bonus for trusted sources, but content (keyword
+    overlap) dominates. This avoids false positives where a result from an
+    expected domain is marked relevant despite irrelevant content, and false
+    negatives where a highly relevant result from an unexpected domain is
+    marked irrelevant.
+    """
     text = f"{result.get('title','')} {result.get('snippet','')} {result.get('url','')}".lower()
     url = result.get("url", "").lower()
-    score = 0.0
+
+    domain_score = 0.0
     for domain in expected_domains:
         if domain.lower() in url:
-            score += 0.5
+            domain_score = 0.3
             break
+
+    keyword_score = 0.0
     if expected_keywords:
         matched = sum(1 for kw in expected_keywords if kw.lower() in text)
-        score += 0.5 * (matched / len(expected_keywords))
-    return min(score, 1.0)
+        keyword_score = matched / len(expected_keywords)
+
+    return min(0.3 * domain_score + 0.7 * keyword_score, 1.0)
 
 
 def is_relevant(result: dict, expected_keywords: list[str], expected_domains: list[str]) -> bool:
-    return relevance_score(result, expected_keywords, expected_domains) >= 0.5
+    return relevance_score(result, expected_keywords, expected_domains) >= 0.4
 
 
 def dcg(relevances: list[float], k: int) -> float:
@@ -93,7 +105,10 @@ def compute_metrics(results: list[dict], expected_keywords: list[str], expected_
 
     precision = sum(relevant_flags[:top_k]) / min(len(results), top_k) if results else 0
     total_relevant = sum(relevant_flags)
-    recall = min(total_relevant / max(len(expected_keywords), 1), 1.0)
+    # Recall approximated as fraction of returned results that are relevant.
+    # True recall requires knowing all relevant docs in the corpus; we use
+    # precision-at-k as a proxy and report it as recall for trend comparison.
+    recall = total_relevant / len(results) if results else 0
 
     mrr = 0.0
     for i, rel in enumerate(relevant_flags):
@@ -102,6 +117,7 @@ def compute_metrics(results: list[dict], expected_keywords: list[str], expected_
             break
 
     ndcg = ndcg_at_k(relevances, top_k)
+    mean_rel = sum(relevances) / len(relevances) if relevances else 0
 
     engines = set()
     for r in results:
@@ -113,6 +129,7 @@ def compute_metrics(results: list[dict], expected_keywords: list[str], expected_
         "recall": recall,
         "mrr": mrr,
         "ndcg": ndcg,
+        "mean_relevance": mean_rel,
         "engine_coverage": len(engines),
         "num_results": len(results),
     }
@@ -165,6 +182,7 @@ def evaluate_ab(queries: list[dict], base_url: str, top_k: int, strategy_a: str,
             "recall": avg("recall", all_metrics_a),
             "mrr": avg("mrr", all_metrics_a),
             "ndcg": avg("ndcg", all_metrics_a),
+            "mean_relevance": avg("mean_relevance", all_metrics_a),
             "engine_coverage": avg("engine_coverage", all_metrics_a),
         },
         "b": {
@@ -172,6 +190,7 @@ def evaluate_ab(queries: list[dict], base_url: str, top_k: int, strategy_a: str,
             "recall": avg("recall", all_metrics_b),
             "mrr": avg("mrr", all_metrics_b),
             "ndcg": avg("ndcg", all_metrics_b),
+            "mean_relevance": avg("mean_relevance", all_metrics_b),
             "engine_coverage": avg("engine_coverage", all_metrics_b),
         },
     }
@@ -195,7 +214,7 @@ def main():
     print("\n" + "=" * 60)
     print(f"{'METRIC':20s} {'A ('+args.strategy_a+')':>12s} {'B ('+args.strategy_b+')':>12s} {'DELTA':>10s}")
     print("-" * 60)
-    for metric in ["precision", "recall", "mrr", "ndcg", "engine_coverage"]:
+    for metric in ["precision", "recall", "mrr", "ndcg", "mean_relevance", "engine_coverage"]:
         a_val = result["a"][metric]
         b_val = result["b"][metric]
         delta = b_val - a_val

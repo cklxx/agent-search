@@ -1,10 +1,5 @@
 //! Built-in search engines.
 
-pub mod bing;
-pub mod brave;
-pub mod duckduckgo;
-pub mod searxng;
-
 use std::sync::Arc;
 
 use reqwest::header::HeaderMap;
@@ -58,17 +53,7 @@ pub(crate) fn pick_client<'a>(
     default_client
 }
 
-pub fn register_builtin(
-    registry: &mut EngineRegistry,
-    searxng_url: &str,
-    proxy_manager: Option<Arc<ProxyManager>>,
-) {
-    registry.register(Arc::new(searxng::Searxng::new(searxng_url, proxy_manager.clone())));
-    registry.register(Arc::new(duckduckgo::DuckDuckGo::new(proxy_manager.clone())));
-    registry.register(Arc::new(bing::Bing::new(proxy_manager.clone())));
-    registry.register(Arc::new(brave::Brave::new(proxy_manager)));
-}
-
+/// All engines come from `engines.yaml`. No built-in Rust impls.
 pub fn register_from_config(
     registry: &mut EngineRegistry,
     config_path: &std::path::Path,
@@ -88,11 +73,9 @@ pub fn register_from_config(
 }
 
 pub fn builtin_registry(
-    searxng_url: &str,
     proxy_manager: Option<Arc<ProxyManager>>,
 ) -> EngineRegistry {
     let mut registry = EngineRegistry::new();
-    register_builtin(&mut registry, searxng_url, proxy_manager.clone());
 
     let config_path = std::path::Path::new("engines.yaml");
     if config_path.exists() {

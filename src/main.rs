@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("starting agent-search on {}:{}", config.host, config.port);
 
     let proxy_manager = Arc::new(config.proxy_manager());
-    let registry = builtin_registry(&config.searxng_url, Some(proxy_manager.clone()));
+    let registry = builtin_registry(Some(proxy_manager.clone()));
     tracing::info!("registered engines: {:?}", registry.names());
 
     let cache = QueryCache::new(config.cache_size, Duration::from_secs(config.cache_ttl_secs));
@@ -39,7 +39,10 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| LocalIndex::new_in_ram().expect("failed to create in-memory index")),
     );
 
-    let strategy = get_strategy(&config.strategy);
+    let strategy = get_strategy(&config.strategy).unwrap_or_else(|| {
+        tracing::warn!("unknown strategy '{}', falling back to bm25", config.strategy);
+        Box::new(agent_search::ranking::Bm25Strategy)
+    });
     tracing::info!("ranking strategy: {}", strategy.name());
 
     let state = AppState {

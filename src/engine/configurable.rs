@@ -7,6 +7,7 @@ use reqwest::header::HeaderMap;
 use reqwest::Client;
 use scraper::{Html, Selector};
 
+use crate::engine::engines::{build_pool_clients, pick_client};
 use crate::engine::config::{EngineConfig, EngineType};
 use crate::engine::trait_def::SearchEngine;
 use crate::models::error::{EngineResult, SearchError};
@@ -18,11 +19,8 @@ const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 
 pub struct ConfigurableEngine {
     config: EngineConfig,
-    /// One client per proxy URL, aligned with `ProxyManager::urls`.
     pool_clients: Vec<Client>,
-    /// No-proxy fallback (or engine-specific proxy).
     default_client: Client,
-    /// `None` when the engine pins its own proxy or has no pool.
     proxy_manager: Option<Arc<ProxyManager>>,
 }
 
@@ -31,30 +29,19 @@ impl ConfigurableEngine {
     pub fn new(config: EngineConfig, proxy_manager: Option<Arc<ProxyManager>>) -> Self {
         let headers = build_headers(&config);
 
-        if let Some(engine_proxy) = &config.proxy {
-            let client = build_client(&headers, Some(engine_proxy));
-            return Self { config, pool_clients: Vec::new(), default_client: client, proxy_manager: None };
-        }
+        // Engine-specific proxy: wrap as a single-element pool.
+        let proxy_manager = match &config.proxy {
+            Some(url) => Some(Arc::new(ProxyManager::new(vec![url.clone()]))),
+            None => proxy_manager,
+        };
 
-        if let Some(pm) = proxy_manager {
-            if !pm.is_empty() {
-                let pool_clients: Vec<Client> = pm.urls().iter().map(|url| build_client(&headers, Some(url))).collect();
-                let default_client = build_client(&headers, None);
-                return Self { config, pool_clients, default_client, proxy_manager: Some(pm) };
-            }
-        }
-
-        let client = build_client(&headers, None);
-        Self { config, pool_clients: Vec::new(), default_client: client, proxy_manager: None }
+        let (pool_clients, default_client, proxy_manager) =
+            build_pool_clients(DEFAULT_USER_AGENT, &headers, proxy_manager);
+        Self { config, pool_clients, default_client, proxy_manager }
     }
 
     fn client(&self) -> &Client {
-        if let Some(pm) = &self.proxy_manager {
-            if let Some(idx) = pm.next_index() {
-                return &self.pool_clients[idx];
-            }
-        }
-        &self.default_client
+        pick_client(&self.pool_clients, &self.default_client, &self.proxy_manager)
     }
 
     fn parse_html(&self, body: &str) -> EngineResult<Vec<RawSearchResult>> {
@@ -182,38 +169,14 @@ fn build_headers(config: &EngineConfig) -> HeaderMap {
     headers
 }
 
-/// Build an HTTP client with the given proxy (if any).
-fn build_client(headers: &HeaderMap, proxy: Option<&str>) -> Client {
-    let mut builder = Client::builder()
-        .user_agent(DEFAULT_USER_AGENT)
-        .default_headers(headers.clone());
-
-    if let Some(url) = proxy {
-        if let Ok(p) = reqwest::Proxy::all(url) {
-            builder = builder.proxy(p);
-        }
-    }
-
-    builder.build().expect("failed to build HTTP client")
-}
-
 #[async_trait]
 impl SearchEngine for ConfigurableEngine {
-    fn name(&self) -> &'static str {
-        // Leak the string to get a 'static reference.
-        // This is safe because engine names are set once at startup.
-        Box::leak(self.config.name.clone().into_boxed_str())
+    fn name(&self) -> &str {
+        &self.config.name
     }
 
-    fn categories(&self) -> &[&'static str] {
-        // Same approach: leak the category strings.
-        let cats: Vec<&'static str> = self
-            .config
-            .categories
-            .iter()
-            .map(|s| Box::leak(s.clone().into_boxed_str()) as &'static str)
-            .collect();
-        Box::leak(cats.into_boxed_slice())
+    fn categories(&self) -> &[String] {
+        &self.config.categories
     }
 
     fn timeout(&self) -> u64 {
@@ -254,10 +217,7 @@ impl SearchEngine for ConfigurableEngine {
         let resp = request.send().await?;
 
         if !resp.status().is_success() {
-            return Err(SearchError::Request(format!(
-                "HTTP {}",
-                resp.status()
-            )));
+            return Err(SearchError::HttpStatus(resp.status().as_u16()));
         }
 
         let body = resp.text().await?;

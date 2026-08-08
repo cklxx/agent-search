@@ -6,8 +6,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Sse};
 use axum::Json;
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::aggregator;
@@ -91,39 +91,52 @@ pub async fn search_ab(
         ..Default::default()
     };
 
-    let strategy_a = get_strategy(strategy_a_name);
-    let strategy_b = get_strategy(strategy_b_name);
-
-    // Run aggregator twice (once per strategy). Simpler than sharing raw results.
-    let resp_a = aggregator::aggregate(&query, &state.registry, &state.suspension, strategy_a.as_ref()).await;
-    let resp_b = aggregator::aggregate(&query, &state.registry, &state.suspension, strategy_b.as_ref()).await;
-
-    match (resp_a, resp_b) {
-        (Ok(a), Ok(b)) => {
-            let urls_a: std::collections::HashSet<&str> = a.results.iter().map(|r| r.url.as_str()).collect();
-            let urls_b: std::collections::HashSet<&str> = b.results.iter().map(|r| r.url.as_str()).collect();
-            let overlap = urls_a.intersection(&urls_b).count();
-
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "query": query.query,
-                    "strategy_a": strategy_a_name,
-                    "strategy_b": strategy_b_name,
-                    "results_a": a.results,
-                    "results_b": b.results,
-                    "overlap": overlap,
-                    "overlap_ratio": overlap as f64 / urls_a.len().max(1) as f64,
-                })),
+    let strategy_a = match get_strategy(strategy_a_name) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("unknown strategy_a: {}", strategy_a_name)})),
             )
-                .into_response()
+                .into_response();
         }
-        (Err(e), _) | (_, Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
+    };
+    let strategy_b = match get_strategy(strategy_b_name) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("unknown strategy_b: {}", strategy_b_name)})),
+            )
+                .into_response();
+        }
+    };
+
+    // Fetch raw results once, score twice with each strategy.
+    let (dedup_map, errors) =
+        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension).await;
+
+    let results_a = aggregator::score_results(dedup_map.clone(), &query, strategy_a.as_ref());
+    let results_b = aggregator::score_results(dedup_map, &query, strategy_b.as_ref());
+
+    let urls_a: std::collections::HashSet<&str> = results_a.iter().map(|r| r.url.as_str()).collect();
+    let urls_b: std::collections::HashSet<&str> = results_b.iter().map(|r| r.url.as_str()).collect();
+    let overlap = urls_a.intersection(&urls_b).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "query": query.query,
+            "strategy_a": strategy_a_name,
+            "strategy_b": strategy_b_name,
+            "results_a": results_a,
+            "results_b": results_b,
+            "overlap": overlap,
+            "overlap_ratio": overlap as f64 / urls_a.len().max(1) as f64,
+            "errors": errors,
+        })),
+    )
+        .into_response()
 }
 
 /// GET /strategies
@@ -147,8 +160,7 @@ pub async fn search_stream(
     State(state): State<AppState>,
     Json(query): Json<SearchQuery>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, axum::Error>>> {
-    let (tx, _rx) = broadcast::channel(100);
-    let tx_clone = tx.clone();
+    let (tx, rx) = mpsc::channel(100);
     let registry = state.registry.clone();
     let suspension = state.suspension.clone();
     let strategy = state.strategy.clone();
@@ -158,17 +170,16 @@ pub async fn search_stream(
         match response {
             Ok(resp) => {
                 for result in resp.results {
-                    let _ = tx_clone.send(serde_json::to_string(&result).unwrap_or_default());
+                    let _ = tx.send(serde_json::to_string(&result).unwrap_or_default()).await;
                 }
             }
             Err(e) => {
-                let _ = tx_clone.send(format!(r#"{{"error":"{}"}}"#, e));
+                let _ = tx.send(format!(r#"{{"error":"{}"}}"#, e)).await;
             }
         }
     });
 
-    let rx = tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|r| r.ok()).map(|msg| {
+    let stream = ReceiverStream::new(rx).map(|msg| {
         Ok(axum::response::sse::Event::default().data(msg))
     });
 
