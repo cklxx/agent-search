@@ -75,19 +75,28 @@ impl RankingStrategy for Bm25Strategy {
 }
 
 fn bm25_score(raw: &RawSearchResult, query: &SearchQuery) -> f32 {
-    let text = format!("{} {} {}", raw.title, raw.url, raw.snippet).to_lowercase();
-    // Tokenize on whitespace and punctuation boundaries.
-    let tokens: Vec<&str> = text
-        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-        .filter(|t| !t.is_empty())
-        .collect();
     let k1 = 1.2;
 
-    let query_terms: Vec<&str> = query
-        .query
-        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-        .filter(|t| !t.is_empty())
-        .collect();
+    // Tokenize each field separately for BM25F field weighting.
+    let title_tokens = tokenize(&raw.title);
+    let url_tokens = tokenize(&raw.url);
+    let snippet_tokens = tokenize(&raw.snippet);
+
+    // BM25F field weights: title > url > snippet.
+    const TITLE_W: f32 = 3.0;
+    const URL_W: f32 = 1.5;
+    const SNIPPET_W: f32 = 1.0;
+
+    // Deduplicate query terms.
+    let query_terms: Vec<&str> = {
+        let mut seen = std::collections::HashSet::new();
+        query
+            .query
+            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+            .filter(|t| !t.is_empty())
+            .filter(|t| seen.insert(t.to_lowercase()))
+            .collect()
+    };
     if query_terms.is_empty() {
         return 0.0;
     }
@@ -96,18 +105,29 @@ fn bm25_score(raw: &RawSearchResult, query: &SearchQuery) -> f32 {
     let mut matched_terms = 0;
     for term in &query_terms {
         let term_lower = term.to_lowercase();
-        // Exact token match, not substring.
-        let tf = tokens.iter().filter(|t| **t == term_lower).count() as f32;
+        // Weighted term frequency across fields (BM25F).
+        let tf_title = title_tokens.iter().filter(|t| **t == term_lower).count() as f32;
+        let tf_url = url_tokens.iter().filter(|t| **t == term_lower).count() as f32;
+        let tf_snippet = snippet_tokens.iter().filter(|t| **t == term_lower).count() as f32;
+        let tf = tf_title * TITLE_W + tf_url * URL_W + tf_snippet * SNIPPET_W;
+
         if tf > 0.0 {
             matched_terms += 1;
         }
-        // BM25 term saturation. Raw tf, not tf/doc_len.
         score += tf * (k1 + 1.0) / (tf + k1);
     }
 
     // Query coverage: boost results that match more query terms.
     let coverage = matched_terms as f32 / query_terms.len() as f32;
     score * (0.5 + 0.5 * coverage)
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .filter(|t| !t.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Normalize a non-negative score to [0, 1) while preserving order.
@@ -125,18 +145,18 @@ impl RankingStrategy for TfIdfStrategy {
     }
 
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, engine_weight: f32, _engines: &[String]) -> f32 {
-        let text = format!("{} {} {}", raw.title, raw.url, raw.snippet).to_lowercase();
-        let tokens: Vec<&str> = text
-            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-            .filter(|t| !t.is_empty())
-            .collect();
+        let tokens = tokenize(&format!("{} {} {}", raw.title, raw.url, raw.snippet));
         let doc_len = tokens.len().max(1) as f32;
 
-        let query_terms: Vec<&str> = query
-            .query
-            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-            .filter(|t| !t.is_empty())
-            .collect();
+        let query_terms: Vec<&str> = {
+            let mut seen = std::collections::HashSet::new();
+            query
+                .query
+                .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+                .filter(|t| !t.is_empty())
+                .filter(|t| seen.insert(t.to_lowercase()))
+                .collect()
+        };
         if query_terms.is_empty() {
             return 0.0;
         }
@@ -144,7 +164,7 @@ impl RankingStrategy for TfIdfStrategy {
         let mut tfidf = 0.0;
         for term in &query_terms {
             let term_lower = term.to_lowercase();
-            let tf = tokens.iter().filter(|t| **t == term_lower).count() as f32 / doc_len;
+            let tf = tokens.iter().filter(|t| *t == &term_lower).count() as f32 / doc_len;
             let idf = 1.0 + (term.len() as f32).ln();
             tfidf += tf * idf;
         }
@@ -181,7 +201,7 @@ impl RankingStrategy for EngineWeightStrategy {
     }
 
     fn score(&self, _raw: &RawSearchResult, _query: &SearchQuery, engine_weight: f32, _engines: &[String]) -> f32 {
-        1.0 / (1.0 + (-engine_weight).exp())
+        normalize(engine_weight)
     }
 }
 
@@ -196,16 +216,16 @@ impl RankingStrategy for Bm25TitleBoostStrategy {
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, engine_weight: f32, _engines: &[String]) -> f32 {
         let bm25 = bm25_score(raw, query);
 
-        let query_terms: Vec<&str> = query
-            .query
-            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-            .filter(|t| !t.is_empty())
-            .collect();
-        let title_lower = raw.title.to_lowercase();
-        let title_tokens: Vec<&str> = title_lower
-            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-            .filter(|t| !t.is_empty())
-            .collect();
+        let query_terms: Vec<&str> = {
+            let mut seen = std::collections::HashSet::new();
+            query
+                .query
+                .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+                .filter(|t| !t.is_empty())
+                .filter(|t| seen.insert(t.to_lowercase()))
+                .collect()
+        };
+        let title_tokens = tokenize(&raw.title);
         let title_match = query_terms
             .iter()
             .filter(|t| title_tokens.iter().any(|tok| tok == &t.to_lowercase()))
