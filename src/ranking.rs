@@ -283,17 +283,36 @@ impl RankingStrategy for BgeRerankerStrategy {
     }
 
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, _engine_weight: f32, _engines: &[String]) -> f32 {
-        // Include URL path tokens — they often carry query-relevant keywords
-        // (e.g. /rust/async-runtime). Title + snippet cover the content.
         let document = format!("{} {} {}", raw.title, raw.url, raw.snippet);
         let mut reranker = match self.reranker.lock() {
             Ok(r) => r,
             Err(_) => return 0.0,
         };
-        match reranker.rerank(&query.query, vec![&document], false, None) {
+        let relevance = match reranker.rerank(&query.query, vec![&document], false, None) {
             Ok(results) => results.first().map(|r| r.score).unwrap_or(0.0),
             Err(_) => 0.0,
+        };
+
+        // Keyword coverage factor: penalize results that don't contain query
+        // terms. The cross-encoder can over-rate semantically related but
+        // off-topic results; this anchors it to explicit query terms.
+        let query_terms: std::collections::HashSet<String> = query
+            .query
+            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_lowercase())
+            .collect();
+        if query_terms.is_empty() {
+            return relevance;
         }
+        let doc_lower = document.to_lowercase();
+        let matched = query_terms
+            .iter()
+            .filter(|t| doc_lower.contains(t.as_str()))
+            .count() as f32;
+        let coverage = matched / query_terms.len() as f32;
+        // Steeper penalty: square coverage so partial matches are demoted more.
+        relevance * coverage * coverage
     }
 }
 
