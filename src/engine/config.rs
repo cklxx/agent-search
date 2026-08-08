@@ -144,6 +144,7 @@ fn default_weight() -> f32 {
 pub enum EngineType {
     Html,
     Json,
+    Xml,
 }
 
 /// CSS selectors for HTML engines.

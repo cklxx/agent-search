@@ -153,9 +153,74 @@ impl ConfigurableEngine {
 
         Ok(results)
     }
-}
 
-/// Build the default header map from engine config.
+    /// Parse Atom/RSS XML using the same CSS selector config as HTML engines.
+    /// URL is extracted from element text (e.g. <id>) or href attribute.
+    fn parse_xml(&self, body: &str) -> EngineResult<Vec<RawSearchResult>> {
+        let selectors = self.config.html.as_ref().ok_or_else(|| {
+            SearchError::Parse("xml selectors not configured".to_string())
+        })?;
+
+        // Strip XML declaration and namespaces — html5ever (used by scraper)
+        // is an HTML parser and doesn't handle XML prologs or namespaces.
+        let cleaned = body
+            .trim_start_matches(|c: char| c != '<')
+            .replace("xmlns=", "xmlns_stripped=")
+            .replace("xmlns:", "xmlns_stripped_");
+        let doc = Html::parse_document(&cleaned);
+        let results_sel = Selector::parse(&selectors.results)
+            .map_err(|e| SearchError::Parse(e.to_string()))?;
+        let url_sel = Selector::parse(&selectors.url)
+            .map_err(|e| SearchError::Parse(e.to_string()))?;
+        let title_sel = Selector::parse(&selectors.title)
+            .map_err(|e| SearchError::Parse(e.to_string()))?;
+        let content_sel = selectors
+            .content
+            .as_ref()
+            .map(|s| Selector::parse(s))
+            .transpose()
+            .map_err(|e| SearchError::Parse(e.to_string()))?;
+
+        let mut results = Vec::new();
+        for (idx, item) in doc.select(&results_sel).enumerate() {
+            let title = item
+                .select(&title_sel)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+
+            // XML: URL may be in href attribute or element text (e.g. <id>).
+            let url = match item.select(&url_sel).next() {
+                Some(el) => el
+                    .value()
+                    .attr("href")
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| el.text().collect::<String>().trim().to_string()),
+                None => String::new(),
+            };
+
+            let snippet = content_sel
+                .as_ref()
+                .and_then(|sel| item.select(sel).next())
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+
+            results.push(RawSearchResult {
+                title,
+                url,
+                snippet,
+                published_date: None,
+                position: (idx + 1) as u32,
+            });
+        }
+
+        Ok(results)
+    }
+}
 fn build_headers(config: &EngineConfig) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (key, value) in &config.headers {
@@ -225,6 +290,7 @@ impl SearchEngine for ConfigurableEngine {
         match self.config.engine_type {
             EngineType::Html => self.parse_html(&body),
             EngineType::Json => self.parse_json(&body),
+            EngineType::Xml => self.parse_xml(&body),
         }
     }
 }

@@ -44,13 +44,12 @@
     content: "story_text"
 
 - name: arxiv
-  type: json
+  type: xml
   categories: [science, scientific publications]
   weight: 1.5
-  search_url: "http://export.arxiv.org/api/query?search_query=all:{query}&max_results=10"
-  # Note: arxiv returns Atom XML, not JSON. This is a placeholder.
-  json:
-    results: "feed/entry"
+  search_url: "https://export.arxiv.org/api/query?search_query=all:{query}&max_results=10"
+  html:
+    results: "entry"
     url: "id"
     title: "title"
     content: "summary"
