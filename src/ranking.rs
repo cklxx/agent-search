@@ -53,6 +53,20 @@ fn domain_authority(url: &str) -> f32 {
 pub trait RankingStrategy: Send + Sync {
     fn name(&self) -> &str;
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, engine_weight: f32, engines: &[String]) -> f32;
+
+    /// Score a batch of results. Default implementation calls `score` per
+    /// result. Strategies with batch-capable models (e.g. cross-encoders)
+    /// should override this for efficiency.
+    fn score_batch(
+        &self,
+        items: &[(RawSearchResult, Vec<String>, f32)],
+        query: &SearchQuery,
+    ) -> Vec<f32> {
+        items
+            .iter()
+            .map(|(raw, engines, weight)| self.score(raw, query, *weight, engines))
+            .collect()
+    }
 }
 
 /// BM25 (simplified: TF, no IDF) × position × engine weight × domain authority. Default.
@@ -288,32 +302,88 @@ impl RankingStrategy for BgeRerankerStrategy {
             Ok(r) => r,
             Err(_) => return 0.0,
         };
-        let relevance = match reranker.rerank(&query.query, vec![&document], false, None) {
+        let relevance = match reranker.rerank(query.query.as_str(), vec![document.as_str()], false, None) {
             Ok(results) => results.first().map(|r| r.score).unwrap_or(0.0),
             Err(_) => 0.0,
         };
 
-        // Keyword coverage factor: penalize results that don't contain query
-        // terms. The cross-encoder can over-rate semantically related but
-        // off-topic results; this anchors it to explicit query terms.
-        let query_terms: std::collections::HashSet<String> = query
-            .query
-            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-            .filter(|t| !t.is_empty())
-            .map(|t| t.to_lowercase())
-            .collect();
-        if query_terms.is_empty() {
-            return relevance;
-        }
-        let doc_lower = document.to_lowercase();
-        let matched = query_terms
-            .iter()
-            .filter(|t| doc_lower.contains(t.as_str()))
-            .count() as f32;
-        let coverage = matched / query_terms.len() as f32;
-        // Steeper penalty: square coverage so partial matches are demoted more.
+        let coverage = query_coverage(&document, query);
         relevance * coverage * coverage
     }
+
+    fn score_batch(
+        &self,
+        items: &[(RawSearchResult, Vec<String>, f32)],
+        query: &SearchQuery,
+    ) -> Vec<f32> {
+        if items.is_empty() {
+            return Vec::new();
+        }
+
+        // Two-stage ranking: coarse BM25 to select top-N, then cross-encoder
+        // reranking. Avoids running the expensive cross-encoder on every
+        // result from every engine.
+        const TOP_N: usize = 30;
+
+        let bm25_scores: Vec<f32> = items
+            .iter()
+            .map(|(raw, _, _)| bm25_score(raw, query))
+            .collect();
+
+        let mut indices: Vec<usize> = (0..items.len()).collect();
+        indices.sort_by(|&a, &b| {
+            bm25_scores[b]
+                .partial_cmp(&bm25_scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let top_indices: Vec<usize> = indices.into_iter().take(TOP_N).collect();
+
+        let documents: Vec<String> = top_indices
+            .iter()
+            .map(|&i| {
+                let (raw, _, _) = &items[i];
+                format!("{} {} {}", raw.title, raw.url, raw.snippet)
+            })
+            .collect();
+
+        let doc_refs: Vec<&str> = documents.iter().map(|s| s.as_str()).collect();
+
+        let mut reranker = match self.reranker.lock() {
+            Ok(r) => r,
+            Err(_) => return vec![0.0; items.len()],
+        };
+
+        let mut scores = vec![0.0; items.len()];
+        if let Ok(results) = reranker.rerank(query.query.as_str(), doc_refs, false, None) {
+            for (rank, r) in results.iter().enumerate() {
+                let orig_idx = top_indices[rank];
+                let coverage = query_coverage(&documents[rank], query);
+                scores[orig_idx] = r.score * coverage * coverage;
+            }
+        }
+
+        scores
+    }
+}
+
+/// Fraction of unique query terms that appear in the document.
+fn query_coverage(document: &str, query: &SearchQuery) -> f32 {
+    let query_terms: std::collections::HashSet<String> = query
+        .query
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect();
+    if query_terms.is_empty() {
+        return 1.0;
+    }
+    let doc_lower = document.to_lowercase();
+    let matched = query_terms
+        .iter()
+        .filter(|t| doc_lower.contains(t.as_str()))
+        .count() as f32;
+    matched / query_terms.len() as f32
 }
 
 pub fn get_strategy(name: &str) -> Option<Box<dyn RankingStrategy>> {

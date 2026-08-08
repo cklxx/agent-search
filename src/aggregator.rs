@@ -20,24 +20,7 @@ pub async fn aggregate(
     strategy: &dyn RankingStrategy,
 ) -> EngineResult<SearchResponse> {
     let (dedup_map, errors) = fetch_raw_results(query, registry, suspension).await;
-
-    let mut results: Vec<SearchResult> = dedup_map
-        .into_iter()
-        .map(|(_, (raw, engines, weight))| {
-            let score = strategy.score(&raw, query, weight, &engines);
-            SearchResult {
-                title: raw.title,
-                url: raw.url,
-                snippet: raw.snippet,
-                published_date: raw.published_date,
-                score,
-                engines,
-            }
-        })
-        .collect();
-
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(query.max_results);
+    let results = score_results(dedup_map, query, strategy);
 
     Ok(SearchResponse {
         query: query.query.clone(),
@@ -134,18 +117,19 @@ pub fn score_results(
     query: &SearchQuery,
     strategy: &dyn RankingStrategy,
 ) -> Vec<SearchResult> {
-    let mut results: Vec<SearchResult> = dedup_map
+    let items: Vec<(RawSearchResult, Vec<String>, f32)> = dedup_map.into_values().collect();
+    let scores = strategy.score_batch(&items, query);
+
+    let mut results: Vec<SearchResult> = items
         .into_iter()
-        .map(|(_, (raw, engines, weight))| {
-            let score = strategy.score(&raw, query, weight, &engines);
-            SearchResult {
-                title: raw.title,
-                url: raw.url,
-                snippet: raw.snippet,
-                published_date: raw.published_date,
-                score,
-                engines,
-            }
+        .zip(scores)
+        .map(|((raw, engines, _weight), score)| SearchResult {
+            title: raw.title,
+            url: raw.url,
+            snippet: raw.snippet,
+            published_date: raw.published_date,
+            score,
+            engines,
         })
         .collect();
 

@@ -131,7 +131,7 @@ fn default_time_range_url() -> String {
 }
 
 fn default_timeout() -> u64 {
-    10
+    5
 }
 
 fn default_weight() -> f32 {
