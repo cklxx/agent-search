@@ -54,6 +54,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Random
 rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
 
 # Async trait
 async-trait = "0.1"

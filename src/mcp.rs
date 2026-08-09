@@ -11,6 +11,7 @@ use axum::Json;
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 
+use crate::models::error::{ErrorCode, ToolError};
 use crate::models::query::SearchQuery;
 use crate::routes::AppState;
 
@@ -23,7 +24,6 @@ pub async fn mcp_post(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Response {
-    // Handle batch requests.
     if let Some(arr) = body.as_array() {
         let mut responses = Vec::new();
         for msg in arr {
@@ -36,7 +36,6 @@ pub async fn mcp_post(
 
     match handle_message(&state, &body).await {
         Some(resp) => (StatusCode::OK, Json(resp)).into_response(),
-        // Notification (no id) -> 202 Accepted.
         None => StatusCode::ACCEPTED.into_response(),
     }
 }
@@ -52,7 +51,6 @@ async fn handle_message(state: &AppState, msg: &Value) -> Option<Value> {
         "tools/list" => Some(handle_tools_list()),
         "tools/call" => Some(handle_tools_call(state, &params).await),
         "ping" => Some(json!({})),
-        // Notifications (no response needed).
         "notifications/initialized" | "notifications/cancelled" | "notifications/progress" => None,
         _ => Some(json!({
             "jsonrpc": "2.0",
@@ -63,7 +61,6 @@ async fn handle_message(state: &AppState, msg: &Value) -> Option<Value> {
 
     match result {
         Some(mut resp) => {
-            // Attach the id to responses that don't already have one (error responses do).
             if let Some(id_val) = id {
                 if resp.get("id").is_none() {
                     resp["id"] = id_val;
@@ -97,7 +94,7 @@ fn handle_tools_list() -> Value {
             "tools": [
                 {
                     "name": "web_search",
-                    "description": "Search the web and return a list of results with title, URL, and snippet.",
+                    "description": "Search the web for a query and return ranked results. Use this when you need current information from the internet, facts, references, or sources. Returns up to 10 results with title, URL, snippet, and relevance score. Do not use for queries that can be answered from training data.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -106,8 +103,12 @@ fn handle_tools_list() -> Value {
                                 "description": "The search query string."
                             }
                         },
-                        "required": ["query"]
-                    }
+                        "required": ["query"],
+                        "additionalProperties": false
+                    },
+                    "inputExamples": [
+                        { "query": "rust async runtime comparison" }
+                    ]
                 }
             ]
         }
@@ -119,25 +120,19 @@ async fn handle_tools_call(state: &AppState, params: &Value) -> Value {
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
     if name != "web_search" {
-        return json!({
-            "result": {
-                "resultType": "complete",
-                "isError": true,
-                "content": [{ "type": "text", "text": format!("unknown tool: {}", name) }]
-            }
-        });
+        return tool_error(ToolError::new(
+            ErrorCode::NotFound,
+            format!("unknown tool: {}", name),
+        ));
     }
 
     let query_str = match args.get("query").and_then(|q| q.as_str()) {
-        Some(q) => q.to_string(),
-        None => {
-            return json!({
-                "result": {
-                    "resultType": "complete",
-                    "isError": true,
-                    "content": [{ "type": "text", "text": "missing required argument: query" }]
-                }
-            });
+        Some(q) if !q.is_empty() => q.to_string(),
+        _ => {
+            return tool_error(
+                ToolError::new(ErrorCode::ValidationError, "missing required argument: query")
+                    .with_field("query", "rust async runtime"),
+            );
         }
     };
 
@@ -160,23 +155,31 @@ async fn handle_tools_call(state: &AppState, params: &Value) -> Value {
         })
         .collect();
 
-    let text = serde_json::to_string_pretty(&results_json).unwrap_or_default();
-
     json!({
         "result": {
             "resultType": "complete",
-            "content": [{ "type": "text", "text": text }],
+            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&results_json).unwrap_or_default() }],
             "structuredContent": { "results": results_json }
         }
     })
 }
 
+/// Build an MCP tool error response with `isError: true`.
+fn tool_error(err: ToolError) -> Value {
+    let text = serde_json::to_string(&err).unwrap_or_else(|_| err.message.clone());
+    json!({
+        "result": {
+            "resultType": "complete",
+            "isError": true,
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": err
+        }
+    })
+}
+
 /// Legacy HTTP+SSE transport: GET /mcp/sse opens an SSE stream.
-/// The first event is an `endpoint` event pointing to the POST endpoint.
 pub async fn mcp_sse() -> Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, axum::Error>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
-
-    // Send the endpoint event so the client knows where to POST.
     let _ = tx.send("endpoint: /mcp/messages".to_string()).await;
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|data| {
@@ -191,8 +194,6 @@ pub async fn mcp_messages(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Response {
-    // Reuse the same message handler; for SSE transport we still return JSON
-    // (the client reads it from the POST response).
     match handle_message(&state, &body).await {
         Some(resp) => (StatusCode::OK, Json(resp)).into_response(),
         None => StatusCode::ACCEPTED.into_response(),

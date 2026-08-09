@@ -1,10 +1,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::Request;
+use axum::http::HeaderName;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+use uuid::Uuid;
 
 use agent_search::cache::QueryCache;
 use agent_search::config::Config;
@@ -111,6 +116,7 @@ async fn async_main() -> anyhow::Result<()> {
     let app = app
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(trace_id_middleware))
         .with_state(state);
 
     let addr = format!("{}:{}", config.host, config.port);
@@ -163,4 +169,27 @@ async fn warmup(state: &AppState, queries: &[String]) {
         }
     }
     tracing::info!("warmup complete");
+}
+
+/// Generate or propagate a trace ID for every request.
+///
+/// Reads `x-trace-id` from the request (if present), otherwise generates a
+/// new UUID v4. The trace ID is set on the response and available via
+/// `tracing::Span::current().record("trace_id", ...)`.
+async fn trace_id_middleware(mut req: Request, next: Next) -> Response {
+    let trace_id = req
+        .headers()
+        .get("x-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    req.extensions_mut().insert(trace_id.clone());
+
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-trace-id"),
+        trace_id.parse().unwrap(),
+    );
+    resp
 }

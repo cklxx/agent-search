@@ -8,12 +8,12 @@ use axum::response::{IntoResponse, Sse};
 use axum::Json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::StreamExt;
 
 use crate::aggregator;
 use crate::cache::{QueryCache, cache_key};
 use crate::engine::{EngineRegistry, EngineSuspensionManager};
 use crate::index::LocalIndex;
+use crate::models::error::{ApiError, ErrorCode};
 use crate::models::query::SearchQuery;
 use crate::ranking::{RankingStrategy, get_strategy, strategy_names};
 
@@ -25,16 +25,12 @@ pub struct AppState {
     pub local_index: Arc<LocalIndex>,
     pub strategy: Arc<dyn RankingStrategy>,
     pub request_timeout: std::time::Duration,
-    /// Upstream search API base URL. When set, /search uses this upstream.
     pub upstream_search_url: Option<String>,
-    /// API key for the upstream search API.
     pub upstream_api_key: Option<String>,
-    /// Shared HTTP client for upstream search (avoids per-call connection setup).
     pub http_client: reqwest::Client,
 }
 
-/// Try upstream search first; fall back to the local aggregator on empty
-/// results. Shared by `/search`, `/web_search`, and the MCP `web_search` tool.
+/// Try upstream search first; fall back to the local aggregator on empty results.
 pub async fn search_with_fallback(
     state: &AppState,
     query: &SearchQuery,
@@ -99,8 +95,6 @@ pub async fn search(
 }
 
 /// POST /search/ab — run two strategies side-by-side.
-///
-/// Body: `{"query": "...", "strategy_a": "bm25", "strategy_b": "tfidf"}`
 pub async fn search_ab(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -108,10 +102,8 @@ pub async fn search_ab(
     let query_str = match body.get("query").and_then(|v| v.as_str()) {
         Some(q) => q.to_string(),
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "query is required"})),
-            )
+            return ApiError::new(ErrorCode::ValidationError, "query is required")
+                .with_param("query", "must be a non-empty string")
                 .into_response();
         }
     };
@@ -129,25 +121,20 @@ pub async fn search_ab(
     let strategy_a = match get_strategy(strategy_a_name) {
         Some(s) => s,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("unknown strategy_a: {}", strategy_a_name)})),
-            )
+            return ApiError::new(ErrorCode::ValidationError, format!("unknown strategy_a: {}", strategy_a_name))
+                .with_param("strategy_a", "one of: bm25, tfidf, bge_reranker")
                 .into_response();
         }
     };
     let strategy_b = match get_strategy(strategy_b_name) {
         Some(s) => s,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("unknown strategy_b: {}", strategy_b_name)})),
-            )
+            return ApiError::new(ErrorCode::ValidationError, format!("unknown strategy_b: {}", strategy_b_name))
+                .with_param("strategy_b", "one of: bm25, tfidf, bge_reranker")
                 .into_response();
         }
     };
 
-    // Fetch raw results once, score twice with each strategy.
     let fetch_result = tokio::time::timeout(
         state.request_timeout,
         aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, aggregator::ENGINE_FANOUT_DEADLINE),
@@ -157,15 +144,10 @@ pub async fn search_ab(
     let (dedup_map, errors) = match fetch_result {
         Ok(v) => v,
         Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(serde_json::json!({"error": "search timed out"})),
-            )
-                .into_response();
+            return ApiError::new(ErrorCode::Timeout, "search timed out").into_response();
         }
     };
 
-    // Score both strategies in parallel on blocking threads.
     let query_clone = query.clone();
     let dedup_map_clone = dedup_map.clone();
     let a_handle = tokio::task::spawn_blocking(move || {
@@ -179,11 +161,7 @@ pub async fn search_ab(
     let (results_a, results_b) = match tokio::join!(a_handle, b_handle) {
         (Ok(a), Ok(b)) => (a, b),
         _ => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "scoring task panicked"})),
-            )
-                .into_response();
+            return ApiError::new(ErrorCode::InternalError, "scoring task panicked").into_response();
         }
     };
 
@@ -224,6 +202,8 @@ pub async fn health() -> impl IntoResponse {
 }
 
 /// POST /search/stream — SSE stream of results.
+///
+/// Events: `result` (one per result), `done` (terminal), `error` (terminal).
 pub async fn search_stream(
     State(state): State<AppState>,
     Json(query): Json<SearchQuery>,
@@ -232,53 +212,66 @@ pub async fn search_stream(
     let registry = state.registry.clone();
     let suspension = state.suspension.clone();
     let strategy = state.strategy.clone();
-
     let request_timeout = state.request_timeout;
+
     tokio::spawn(async move {
         let response = tokio::time::timeout(
             request_timeout,
             aggregator::aggregate(&query, &registry, &suspension, strategy.clone()),
         )
         .await;
+
         match response {
             Ok(Ok(resp)) => {
                 for result in resp.results {
-                    let _ = tx.send(serde_json::to_string(&result).unwrap_or_default()).await;
+                    let payload = serde_json::to_string(&result).unwrap_or_default();
+                    if tx
+                        .send(Ok(axum::response::sse::Event::default().event("result").data(payload)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
+                let _ = tx
+                    .send(Ok(axum::response::sse::Event::default().event("done").data("")))
+                    .await;
             }
             Ok(Err(e)) => {
+                let err = ApiError::from(e);
+                let payload = serde_json::to_string(&err).unwrap_or_default();
                 let _ = tx
-                    .send(serde_json::json!({"error": e.to_string()}).to_string())
+                    .send(Ok(axum::response::sse::Event::default().event("error").data(payload)))
                     .await;
             }
             Err(_) => {
+                let err = ApiError::new(ErrorCode::Timeout, "search timed out");
+                let payload = serde_json::to_string(&err).unwrap_or_default();
                 let _ = tx
-                    .send(serde_json::json!({"error": "search timed out"}).to_string())
+                    .send(Ok(axum::response::sse::Event::default().event("error").data(payload)))
                     .await;
             }
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(|msg| {
-        Ok(axum::response::sse::Event::default().data(msg))
-    });
-
-    Sse::new(stream)
+    let stream = ReceiverStream::new(rx);
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
-/// POST /web_search — simple search endpoint that can replace a relay's
-/// web_search tool backend. Takes `{"query": "..."}` and returns results.
+/// POST /web_search — simple search endpoint.
 pub async fn web_search(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let query_str = match body.get("query").and_then(|v| v.as_str()) {
-        Some(q) => q.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "query is required"})),
-            )
+        Some(q) if !q.is_empty() => q.to_string(),
+        _ => {
+            return ApiError::new(ErrorCode::ValidationError, "query is required")
+                .with_param("query", "must be a non-empty string")
                 .into_response();
         }
     };
@@ -304,12 +297,10 @@ pub async fn fetch_content(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let url = match params.get("url") {
-        Some(u) => u.clone(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "url parameter is required"})),
-            )
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => {
+            return ApiError::new(ErrorCode::ValidationError, "url parameter is required")
+                .with_param("url", "https://example.com")
                 .into_response();
         }
     };
@@ -325,17 +316,11 @@ pub async fn fetch_content(
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => ApiError::new(ErrorCode::UpstreamError, e.to_string()).into_response(),
     }
 }
 
 /// Call the upstream LLM relay's web_search tool and return parsed results.
-/// Returns an empty vec if the upstream fails or returns no results; the
-/// caller is responsible for falling back to the local aggregator.
 pub async fn search_upstream(
     client: &reqwest::Client,
     upstream: &str,
@@ -382,15 +367,12 @@ pub async fn search_upstream(
 }
 
 /// Parse search results from the model's text output.
-/// Supports both JSON array and numbered list formats.
 pub fn parse_search_results(content: &str) -> Vec<crate::models::result::SearchResult> {
-    // Try JSON array first.
     if let Some(results) = parse_json_results(content) {
         if !results.is_empty() {
             return results;
         }
     }
-    // Fall back to numbered list format.
     parse_numbered_list(content)
 }
 
@@ -445,7 +427,6 @@ fn parse_numbered_list(content: &str) -> Vec<crate::models::result::SearchResult
             let title = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
             let url = caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
             let mut snippet = String::new();
-            // Next line might be the snippet: "   - Snippet"
             if i + 1 < lines.len() {
                 let next = lines[i + 1].trim_start();
                 if let Some(s) = next.strip_prefix("- ") {
@@ -470,11 +451,6 @@ fn parse_numbered_list(content: &str) -> Vec<crate::models::result::SearchResult
 }
 
 /// POST /v1/chat/completions — OpenAI-compatible endpoint.
-///
-/// Requests with the `web_search` tool are served locally by the search
-/// pipeline. All other requests are transparently proxied to the upstream
-/// LLM relay (super-relay). This lets cc point its API URL at agent-search:
-/// web_search works locally, LLM inference still goes through the relay.
 pub async fn chat_completions(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -489,7 +465,6 @@ pub async fn chat_completions(
         })
         .unwrap_or(false);
 
-    // Non-search requests: proxy to the upstream LLM relay.
     if !has_web_search {
         if let Some(ref upstream) = state.upstream_search_url {
             let url = format!("{}/v1/chat/completions", upstream.trim_end_matches('/'));
@@ -504,22 +479,14 @@ pub async fn chat_completions(
                     return (status, text).into_response();
                 }
                 Err(e) => {
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({"error": format!("upstream proxy failed: {}", e)})),
-                    )
+                    return ApiError::new(ErrorCode::UpstreamError, format!("upstream proxy failed: {}", e))
                         .into_response();
                 }
             }
         }
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "no upstream LLM configured"})),
-        )
-            .into_response();
+        return ApiError::new(ErrorCode::ValidationError, "no upstream LLM configured").into_response();
     }
 
-    // web_search tool: serve locally.
     let query = body
         .get("messages")
         .and_then(|m| m.as_array())
@@ -530,11 +497,7 @@ pub async fn chat_completions(
         .to_string();
 
     if query.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "no user message"})),
-        )
-            .into_response();
+        return ApiError::new(ErrorCode::ValidationError, "no user message").into_response();
     }
 
     let search_query = SearchQuery {
@@ -586,10 +549,6 @@ pub async fn chat_completions(
 }
 
 /// POST /v1/messages — Anthropic-compatible endpoint.
-///
-/// Requests with the `web_search` tool: run local search, inject results
-/// into the user message, then forward to the upstream LLM relay without
-/// the web_search tool. All other requests are proxied transparently.
 pub async fn messages(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -607,18 +566,13 @@ pub async fn messages(
     let upstream = match state.upstream_search_url.as_ref() {
         Some(u) => u,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "no upstream LLM configured"})),
-            )
-                .into_response();
+            return ApiError::new(ErrorCode::ValidationError, "no upstream LLM configured").into_response();
         }
     };
 
     let mut body = body;
 
     if has_web_search {
-        // Extract query from the last user message.
         let query = body
             .get("messages")
             .and_then(|m| m.as_array())
@@ -642,7 +596,6 @@ pub async fn messages(
             };
             let results = search_with_fallback(&state, &search_query).await;
 
-            // Format search results as context.
             let search_context = if results.is_empty() {
                 String::new()
             } else {
@@ -665,7 +618,6 @@ pub async fn messages(
                 )
             };
 
-            // Inject search results into the last user message.
             if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
                 if let Some(last) = msgs.last_mut() {
                     if let Some(content) = last.get_mut("content") {
@@ -685,14 +637,12 @@ pub async fn messages(
                 }
             }
 
-            // Remove web_search tool before forwarding.
             if let Some(tools) = body.get_mut("tools").and_then(|t| t.as_array_mut()) {
                 tools.retain(|t| t.get("type").and_then(|ty| ty.as_str()) != Some("web_search"));
             }
         }
     }
 
-    // Forward to upstream LLM relay.
     let url = format!("{}/v1/messages", upstream.trim_end_matches('/'));
     let mut req = state.http_client.post(&url).json(&body);
     if let Some(key) = state.upstream_api_key.as_deref() {
@@ -706,10 +656,6 @@ pub async fn messages(
             let text = resp.text().await.unwrap_or_default();
             (status, text).into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("upstream proxy failed: {}", e)})),
-        )
-            .into_response(),
+        Err(e) => ApiError::new(ErrorCode::UpstreamError, format!("upstream proxy failed: {}", e)).into_response(),
     }
 }
