@@ -14,6 +14,7 @@ use crate::models::error::{EngineResult, SearchError};
 use crate::models::query::SearchQuery;
 use crate::models::result::RawSearchResult;
 use crate::proxy::ProxyManager;
+use crate::TRACE_ID;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -130,10 +131,18 @@ impl ConfigurableEngine {
         // These return HTTP 200 with an error body, not a 4xx status, so we
         // check for common error fields and treat them as rate-limit errors
         // to trigger the 180s suspension instead of noisy parse-error retries.
-        if data.get("error").is_some()
-            || data.get("error_message").is_some()
-            || data.get("error_id").is_some()
-        {
+        // `is_some()` alone would match `"error": null`/`false`/`0`/`""`, so
+        // we require a non-null value (and non-empty string for error_message).
+        let has_error = data
+            .get("error")
+            .is_some_and(|v| !v.is_null())
+            || data
+                .get("error_message")
+                .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            || data
+                .get("error_id")
+                .is_some_and(|v| !v.is_null());
+        if has_error {
             return Err(SearchError::HttpStatus(429));
         }
 
@@ -299,6 +308,11 @@ impl SearchEngine for ConfigurableEngine {
 
         for (key, value) in &self.config.cookies {
             request = request.header("Cookie", format!("{}={}", key, value));
+        }
+
+        // Forward the request trace ID to upstream engines for distributed tracing.
+        if let Ok(trace_id) = TRACE_ID.try_with(|id| id.clone()) {
+            request = request.header("x-trace-id", trace_id);
         }
 
         if let Some(ref body) = self.config.request_body {

@@ -11,6 +11,8 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+use agent_search::TRACE_ID;
+
 use agent_search::cache::QueryCache;
 use agent_search::config::Config;
 use agent_search::engine::engines::builtin_registry;
@@ -85,6 +87,7 @@ async fn async_main() -> anyhow::Result<()> {
         upstream_search_url: config.upstream_search_url.clone(),
         upstream_api_key: config.upstream_api_key.clone(),
         http_client,
+        engine_semaphore: Arc::new(tokio::sync::Semaphore::new(agent_search::aggregator::MAX_CONCURRENT_ENGINES)),
     };
 
     // Warmup: preheat the ranking model and populate caches for common queries.
@@ -158,6 +161,7 @@ async fn warmup(state: &AppState, queries: &[String]) {
             &state.registry,
             &state.suspension,
             state.strategy.clone(),
+            &state.engine_semaphore,
         )
         .await
         {
@@ -188,10 +192,19 @@ async fn trace_id_middleware(mut req: Request, next: Next) -> Response {
 
     req.extensions_mut().insert(trace_id.clone());
 
-    let mut resp = next.run(req).await;
-    resp.headers_mut().insert(
-        HeaderName::from_static("x-trace-id"),
-        trace_id.parse().unwrap(),
-    );
-    resp
+    // Record trace_id on the current span so it appears in all log lines.
+    tracing::Span::current().record("trace_id", tracing::field::display(&trace_id));
+
+    // Set the task-local trace ID so downstream code (engine requests, etc.)
+    // can forward it in x-trace-id headers.
+    TRACE_ID
+        .scope(trace_id.clone(), async move {
+            let mut resp = next.run(req).await;
+            resp.headers_mut().insert(
+                HeaderName::from_static("x-trace-id"),
+                trace_id.parse().unwrap(),
+            );
+            resp
+        })
+        .await
 }

@@ -14,13 +14,13 @@ use crate::models::query::{SearchQuery, infer_categories};
 use crate::models::result::{EngineErrorInfo, RawSearchResult, SearchResponse, SearchResult};
 use crate::ranking::RankingStrategy;
 
-/// Global engine fan-out deadline. Caps worst-case latency; fast engines
-/// usually return within a few hundred ms, slow ones are cut off here.
-pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_secs(15);
+/// Global engine fan-out deadline. Must be less than request_timeout so the
+/// cross-encoder scoring step has time to run (scoring budget = request_timeout - this).
+pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_secs(12);
 
-/// Max concurrent engine requests. Prevents resource contention from
-/// timing out otherwise-fast engines when 30+ engines fire at once.
-const MAX_CONCURRENT_ENGINES: usize = 16;
+/// Max concurrent engine requests across all in-flight searches.
+/// Prevents resource contention from timing out otherwise-fast engines.
+pub const MAX_CONCURRENT_ENGINES: usize = 16;
 
 /// Fan out to non-suspended engines, dedup by URL, score with `strategy`, sort.
 pub async fn aggregate(
@@ -28,8 +28,9 @@ pub async fn aggregate(
     registry: &EngineRegistry,
     suspension: &EngineSuspensionManager,
     strategy: Arc<dyn RankingStrategy>,
+    semaphore: &Arc<Semaphore>,
 ) -> EngineResult<SearchResponse> {
-    let (dedup_map, errors) = fetch_raw_results(query, registry, suspension, ENGINE_FANOUT_DEADLINE).await;
+    let (dedup_map, errors) = fetch_raw_results(query, registry, suspension, ENGINE_FANOUT_DEADLINE, semaphore).await;
 
     tracing::debug!(dedup_count = dedup_map.len(), error_count = errors.len(), "fetch_raw_results complete");
 
@@ -68,6 +69,7 @@ pub async fn fetch_raw_results(
     registry: &EngineRegistry,
     suspension: &EngineSuspensionManager,
     deadline: Duration,
+    semaphore: &Arc<Semaphore>,
 ) -> (
     HashMap<String, (RawSearchResult, Vec<String>, f32)>,
     Vec<EngineErrorInfo>,
@@ -89,7 +91,6 @@ pub async fn fetch_raw_results(
         .map(|e| (e.name().to_string(), e.weight()))
         .collect();
 
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_ENGINES));
     let mut tasks: JoinSet<(String, EngineResult<Vec<RawSearchResult>>)> = JoinSet::new();
 
     for engine in &engines {

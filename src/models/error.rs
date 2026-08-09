@@ -176,9 +176,32 @@ impl From<axum::extract::rejection::JsonRejection> for ApiError {
                 .with_param("body", "request body failed to deserialize"),
             JsonSyntaxError(e) => ApiError::new(ErrorCode::ValidationError, e.to_string())
                 .with_param("body", "request body is not valid JSON"),
-            MissingJsonContentType => ApiError::new(ErrorCode::ValidationError, "missing Content-Type: application/json header")
+            MissingJsonContentType(..) => ApiError::new(ErrorCode::ValidationError, "missing Content-Type: application/json header")
                 .with_param("Content-Type", "must be application/json"),
             _ => ApiError::new(ErrorCode::ValidationError, rejection.to_string()),
+        }
+    }
+}
+
+/// JSON extractor that returns RFC 9457 errors on malformed bodies.
+/// Drop-in replacement for `axum::Json<T>`.
+pub struct ValidatedJson<T>(pub T);
+
+#[async_trait::async_trait]
+impl<T, S> axum::extract::FromRequest<S> for ValidatedJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(value)) => Ok(ValidatedJson(value)),
+            Err(rejection) => Err(ApiError::from(rejection)),
         }
     }
 }

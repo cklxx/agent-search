@@ -141,6 +141,7 @@ impl LocalIndex {
         searcher: &tantivy::Searcher,
         top_docs: Vec<(f32, tantivy::DocAddress)>,
     ) -> Vec<SearchResult> {
+        let mut seen = std::collections::HashSet::new();
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
             let retrieved_doc = match searcher.doc(doc_address) {
@@ -151,6 +152,11 @@ impl LocalIndex {
             let url = field_str(&retrieved_doc, self.url_field);
             let snippet = field_str(&retrieved_doc, self.snippet_field);
             let engine = field_str(&retrieved_doc, self.engine_field);
+
+            // Dedup by URL: the same page may be indexed under multiple queries.
+            if !seen.insert(url.clone()) {
+                continue;
+            }
 
             results.push(SearchResult {
                 title,

@@ -12,7 +12,8 @@ pub async fn fetch_and_extract(
     if !resp.status().is_success() {
         return Err(resp.error_for_status().unwrap_err());
     }
-    let body = resp.text().await?;
+    let bytes = resp.bytes().await?;
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     Ok(extract_content(&body))
 }
 

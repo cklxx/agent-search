@@ -28,6 +28,11 @@ pub struct SearchQuery {
     /// Optional category hint. If absent, inferred from query keywords.
     #[serde(default)]
     pub category: Option<String>,
+
+    /// Trace ID for distributed tracing. Not deserialized from request body;
+    /// populated by the trace middleware from the x-trace-id header.
+    #[serde(skip)]
+    pub trace_id: Option<String>,
 }
 
 fn default_max_results() -> usize {
@@ -44,6 +49,7 @@ impl Default for SearchQuery {
             page: 0,
             safe_search: 0,
             category: None,
+            trace_id: None,
         }
     }
 }

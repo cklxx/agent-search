@@ -27,6 +27,7 @@ fn test_state() -> AppState {
         upstream_search_url: None,
         upstream_api_key: None,
         http_client: reqwest::Client::new(),
+        engine_semaphore: Arc::new(tokio::sync::Semaphore::new(agent_search::aggregator::MAX_CONCURRENT_ENGINES)),
     }
 }
 

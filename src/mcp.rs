@@ -94,20 +94,40 @@ fn handle_tools_list() -> Value {
             "tools": [
                 {
                     "name": "web_search",
-                    "description": "Search the web for a query and return ranked results. Use this when you need current information from the internet, facts, references, or sources. Returns up to 10 results with title, URL, snippet, and relevance score. Do not use for queries that can be answered from training data.",
+                    "description": "Search the web for a query and return ranked results. Use this when you need current information from the internet, facts, references, or sources. Returns up to max_results (default 10) results with title, URL, snippet, and relevance score. Do not use for queries that can be answered from training data.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
                                 "description": "The search query string."
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Maximum number of results to return (1-50, default 10).",
+                                "minimum": 1,
+                                "maximum": 50
+                            },
+                            "time_range": {
+                                "type": "string",
+                                "description": "Filter results by recency.",
+                                "enum": ["day", "week", "month", "year"]
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Preferred language for results (e.g. 'en', 'zh')."
+                            },
+                            "category": {
+                                "type": "string",
+                                "description": "Force a specific engine category (e.g. 'general', 'it', 'science'). Overrides keyword-based inference."
                             }
                         },
                         "required": ["query"],
                         "additionalProperties": false
                     },
                     "inputExamples": [
-                        { "query": "rust async runtime comparison" }
+                        { "query": "rust async runtime comparison" },
+                        { "query": "latest transformer papers", "time_range": "month", "max_results": 15 }
                     ]
                 }
             ]
@@ -136,12 +156,39 @@ async fn handle_tools_call(state: &AppState, params: &Value) -> Value {
         }
     };
 
+    let max_results = args
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.clamp(1, 50) as usize)
+        .unwrap_or(10);
+
+    let time_range = args
+        .get("time_range")
+        .and_then(|v| v.as_str())
+        .filter(|s| matches!(*s, "day" | "week" | "month" | "year"))
+        .map(|s| s.to_string());
+
+    let language = args
+        .get("language")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let category = args
+        .get("category")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let query = SearchQuery {
         query: query_str,
+        max_results,
+        time_range,
+        language,
+        category,
         ..Default::default()
     };
 
-    let results = crate::routes::search_with_fallback(state, &query).await;
+    let response = crate::routes::search_with_fallback(state, &query).await;
+    let results = response.results;
 
     let results_json: Vec<Value> = results
         .iter()
@@ -178,15 +225,37 @@ fn tool_error(err: ToolError) -> Value {
 }
 
 /// Legacy HTTP+SSE transport: GET /mcp/sse opens an SSE stream.
+///
+/// Sends the endpoint event and keeps the stream alive with periodic
+/// heartbeat comments. Responses are returned directly from POST
+/// /mcp/messages (Streamable HTTP style), which most MCP clients accept
+/// even in SSE mode.
 pub async fn mcp_sse() -> Sse<impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, axum::Error>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+
+    // Send the endpoint event so the client knows where to POST requests.
     let _ = tx.send("endpoint: /mcp/messages".to_string()).await;
+
+    // Heartbeat task: send a comment every 15s to keep the connection alive.
+    let tx_heartbeat = tx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            if tx_heartbeat.send(": keepalive".to_string()).await.is_err() {
+                break;
+            }
+        }
+    });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|data| {
         Ok(axum::response::sse::Event::default().data(data))
     });
 
-    Sse::new(stream)
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    )
 }
 
 /// Legacy HTTP+SSE transport: POST /mcp/messages handles JSON-RPC.

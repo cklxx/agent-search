@@ -6,6 +6,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Sse};
 use axum::Json;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -28,13 +29,16 @@ pub struct AppState {
     pub upstream_search_url: Option<String>,
     pub upstream_api_key: Option<String>,
     pub http_client: reqwest::Client,
+    /// Shared across all requests to bound total upstream engine concurrency.
+    pub engine_semaphore: Arc<Semaphore>,
 }
 
 /// Try upstream search first; fall back to the local aggregator on empty results.
+/// Returns the full SearchResponse so engine errors propagate to the caller.
 pub async fn search_with_fallback(
     state: &AppState,
     query: &SearchQuery,
-) -> Vec<crate::models::result::SearchResult> {
+) -> crate::models::result::SearchResponse {
     if let Some(ref upstream) = state.upstream_search_url {
         let upstream_results = tokio::time::timeout(
             state.request_timeout,
@@ -44,19 +48,38 @@ pub async fn search_with_fallback(
         .unwrap_or_default();
 
         if !upstream_results.is_empty() {
-            return upstream_results;
+            return crate::models::result::SearchResponse {
+                query: query.query.clone(),
+                results: upstream_results,
+                errors: Vec::new(),
+            };
         }
         tracing::warn!("upstream search returned no results, falling back to local aggregator");
     }
 
     match tokio::time::timeout(
         state.request_timeout,
-        aggregator::aggregate(query, &state.registry, &state.suspension, state.strategy.clone()),
+        aggregator::aggregate(query, &state.registry, &state.suspension, state.strategy.clone(), &state.engine_semaphore),
     )
     .await
     {
-        Ok(Ok(response)) => response.results,
-        _ => Vec::new(),
+        Ok(Ok(response)) => response,
+        Ok(Err(e)) => crate::models::result::SearchResponse {
+            query: query.query.clone(),
+            results: Vec::new(),
+            errors: vec![crate::models::result::EngineErrorInfo {
+                engine: "aggregator".to_string(),
+                error: e.to_string(),
+            }],
+        },
+        Err(_) => crate::models::result::SearchResponse {
+            query: query.query.clone(),
+            results: Vec::new(),
+            errors: vec![crate::models::result::EngineErrorInfo {
+                engine: "system".to_string(),
+                error: "request timed out".to_string(),
+            }],
+        },
     }
 }
 
@@ -68,11 +91,14 @@ pub async fn search(
     let key = cache_key(&query);
 
     if let Some(cached) = state.cache.get(&key).await {
+        tracing::debug!(cache = "query", hit = true, "cache hit");
         return (StatusCode::OK, Json((*cached).clone())).into_response();
     }
+    tracing::debug!(cache = "query", hit = false, "cache miss");
 
     // Exact query cache (same query string).
     if let Some(mut local_results) = state.local_index.search_cached(&query.query) {
+        tracing::debug!(cache = "exact_index", hit = true, count = local_results.len());
         local_results.truncate(query.max_results);
         let response = crate::models::result::SearchResponse {
             query: query.query.clone(),
@@ -83,10 +109,12 @@ pub async fn search(
         state.cache.insert(key, response.clone()).await;
         return (StatusCode::OK, Json((*response).clone())).into_response();
     }
+    tracing::debug!(cache = "exact_index", hit = false);
 
     // Full-text index (crawled pages). Return early if we have enough hits.
     if let Some(mut ft_results) = state.local_index.search_fulltext(&query.query, query.max_results) {
         if ft_results.len() >= 3 {
+            tracing::debug!(cache = "fulltext", hit = true, count = ft_results.len());
             ft_results.truncate(query.max_results);
             let response = crate::models::result::SearchResponse {
                 query: query.query.clone(),
@@ -98,21 +126,26 @@ pub async fn search(
             return (StatusCode::OK, Json((*response).clone())).into_response();
         }
     }
+    tracing::debug!(cache = "fulltext", hit = false);
 
-    let results = search_with_fallback(&state, &query).await;
+    let response = search_with_fallback(&state, &query).await;
 
     // Async-crawl the top results to build the local full-text index.
-    crawl_result_pages(&state, &results).await;
+    crawl_result_pages(&state, &response.results).await;
 
-    let response = crate::models::result::SearchResponse {
-        query: query.query.clone(),
-        results,
-        errors: Vec::new(),
-    };
     let _ = state.local_index.cache_results(&query.query, &response.results);
-    let response = Arc::new(response);
-    state.cache.insert(key, response.clone()).await;
-    (StatusCode::OK, Json((*response).clone())).into_response()
+
+    // Only cache non-empty results. Empty results (all engines failed) should
+    // not be cached so the next request can retry engines that may have recovered.
+    if !response.results.is_empty() {
+        let response = Arc::new(response);
+        state.cache.insert(key, response.clone()).await;
+        (StatusCode::OK, Json((*response).clone())).into_response()
+    } else {
+        // All engines failed or timed out. Return 502 with error details.
+        let api_error = ApiError::new(ErrorCode::UpstreamError, "all engines failed or timed out");
+        (StatusCode::BAD_GATEWAY, Json(api_error)).into_response()
+    }
 }
 
 /// Crawl the top N result URLs and index their content for future full-text searches.
@@ -185,7 +218,7 @@ pub async fn search_ab(
 
     let fetch_result = tokio::time::timeout(
         state.request_timeout,
-        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, aggregator::ENGINE_FANOUT_DEADLINE),
+        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, aggregator::ENGINE_FANOUT_DEADLINE, &state.engine_semaphore),
     )
     .await;
 
@@ -261,11 +294,12 @@ pub async fn search_stream(
     let suspension = state.suspension.clone();
     let strategy = state.strategy.clone();
     let request_timeout = state.request_timeout;
+    let semaphore = state.engine_semaphore.clone();
 
     tokio::spawn(async move {
         let response = tokio::time::timeout(
             request_timeout,
-            aggregator::aggregate(&query, &registry, &suspension, strategy.clone()),
+            aggregator::aggregate(&query, &registry, &suspension, strategy.clone(), &semaphore),
         )
         .await;
 
@@ -328,13 +362,14 @@ pub async fn web_search(
         query: query_str.clone(),
         ..Default::default()
     };
-    let results = search_with_fallback(&state, &query).await;
+    let response = search_with_fallback(&state, &query).await;
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "query": query_str,
-            "results": results,
+            "results": response.results,
+            "errors": response.errors,
         })),
     )
         .into_response()
@@ -430,18 +465,32 @@ pub async fn search_upstream(
     }
 
     let content = match req.send().await {
-        Ok(resp) => match resp.text().await {
-            Ok(t) => serde_json::from_str::<serde_json::Value>(&t)
-                .ok()
-                .and_then(|v| {
-                    v.pointer("/choices/0/message/content")
-                        .and_then(|c| c.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_default(),
-            Err(_) => String::new(),
-        },
-        Err(_) => String::new(),
+        Ok(resp) => {
+            let status = resp.status();
+            match resp.text().await {
+                Ok(t) => {
+                    if !status.is_success() {
+                        tracing::warn!(upstream = %upstream, status = %status, "upstream search returned error status");
+                    }
+                    serde_json::from_str::<serde_json::Value>(&t)
+                        .ok()
+                        .and_then(|v| {
+                            v.pointer("/choices/0/message/content")
+                                .and_then(|c| c.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .unwrap_or_default()
+                }
+                Err(e) => {
+                    tracing::warn!(upstream = %upstream, error = %e, "failed to read upstream search response body");
+                    String::new()
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(upstream = %upstream, error = %e, "upstream search request failed");
+            String::new()
+        }
     };
 
     parse_search_results(&content)
@@ -585,7 +634,8 @@ pub async fn chat_completions(
         query: query.clone(),
         ..Default::default()
     };
-    let results = search_with_fallback(&state, &search_query).await;
+    let response = search_with_fallback(&state, &search_query).await;
+    let results = response.results;
 
     let content = if results.is_empty() {
         "No search results found.".to_string()
@@ -675,7 +725,8 @@ pub async fn messages(
                 query: query.clone(),
                 ..Default::default()
             };
-            let results = search_with_fallback(&state, &search_query).await;
+            let response = search_with_fallback(&state, &search_query).await;
+            let results = response.results;
 
             let search_context = if results.is_empty() {
                 String::new()
