@@ -70,6 +70,12 @@ pub fn infer_categories(query: &str) -> Vec<&'static str> {
         || q.contains("peer review")
         || q.contains("journal")
         || q.contains("conference")
+        || q.contains("quantum")
+        || q.contains("physics")
+        || q.contains("chemistry")
+        || q.contains("biology")
+        || q.contains("genome")
+        || q.contains("molecule")
     {
         cats.push("science");
         cats.push("scientific publications");

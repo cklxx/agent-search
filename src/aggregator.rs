@@ -20,7 +20,7 @@ pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Max concurrent engine requests. Prevents resource contention from
 /// timing out otherwise-fast engines when 30+ engines fire at once.
-const MAX_CONCURRENT_ENGINES: usize = 12;
+const MAX_CONCURRENT_ENGINES: usize = 16;
 
 /// Fan out to non-suspended engines, dedup by URL, score with `strategy`, sort.
 pub async fn aggregate(
@@ -106,9 +106,9 @@ pub async fn fetch_raw_results(
             // more time, low-quality ones are dropped fast. Capped below the
             // global fan-out deadline.
             let timeout = match engine.weight() {
-                w if w >= 1.5 => Duration::from_secs(8),
-                w if w >= 1.0 => Duration::from_secs(6),
-                _ => Duration::from_secs(4),
+                w if w >= 1.5 => Duration::from_secs(10),
+                w if w >= 1.0 => Duration::from_secs(8),
+                _ => Duration::from_secs(6),
             };
             let result = tokio::time::timeout(timeout, engine.search(&q)).await;
             match result {
