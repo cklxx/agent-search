@@ -159,3 +159,226 @@ queries:
     category: tools
     expected_keywords: ["CI", "CD", "GitHub Actions", "pipeline"]
     expected_domains: ["docs.github.com", "stackoverflow.com"]
+
+  # --- LLM / AI ---
+  - query: "LLaMA fine-tuning LoRA parameter efficient"
+    category: ai
+    expected_keywords: ["LLaMA", "LoRA", "fine-tuning", "parameter efficient"]
+    expected_domains: ["arxiv.org", "huggingface.co", "github.com"]
+
+  - query: "GPTQ quantization 4-bit LLM inference"
+    category: ai
+    expected_keywords: ["GPTQ", "quantization", "4-bit", "LLM"]
+    expected_domains: ["arxiv.org", "github.com", "huggingface.co"]
+
+  - query: "retrieval augmented generation RAG chunking strategy"
+    category: ai
+    expected_keywords: ["RAG", "retrieval", "chunking", "augmented"]
+    expected_domains: ["arxiv.org", "pinecone.io", "huggingface.co"]
+
+  - query: "flash attention memory efficient transformer"
+    category: ai
+    expected_keywords: ["flash attention", "memory", "efficient", "attention"]
+    expected_domains: ["arxiv.org", "github.com"]
+
+  - query: "speculative decoding LLM inference speedup"
+    category: ai
+    expected_keywords: ["speculative decoding", "inference", "speedup", "LLM"]
+    expected_domains: ["arxiv.org", "github.com"]
+
+  - query: "RLHF reinforcement learning from human feedback"
+    category: ai
+    expected_keywords: ["RLHF", "reinforcement learning", "human feedback"]
+    expected_domains: ["arxiv.org", "huggingface.co"]
+
+  - query: "Mixture of Experts MoE sparse transformer"
+    category: ai
+    expected_keywords: ["Mixture of Experts", "MoE", "sparse", "transformer"]
+    expected_domains: ["arxiv.org", "huggingface.co"]
+
+  - query: "KV cache quantization LLM serving throughput"
+    category: ai
+    expected_keywords: ["KV cache", "quantization", "serving", "LLM"]
+    expected_domains: ["arxiv.org", "github.com"]
+
+  # --- Systems ---
+  - query: "Linux virtual memory page table TLB"
+    category: systems
+    expected_keywords: ["virtual memory", "page table", "TLB", "Linux"]
+    expected_domains: ["kernel.org", "wikipedia.org", "man7.org"]
+
+  - query: "CFS completely fair scheduler Linux kernel"
+    category: systems
+    expected_keywords: ["CFS", "scheduler", "completely fair", "Linux"]
+    expected_domains: ["kernel.org", "wikipedia.org"]
+
+  - query: "ext4 file system journaling inode block"
+    category: systems
+    expected_keywords: ["ext4", "journaling", "inode", "file system"]
+    expected_domains: ["kernel.org", "wikipedia.org"]
+
+  - query: "Raft consensus algorithm leader election"
+    category: systems
+    expected_keywords: ["Raft", "consensus", "leader election", "distributed"]
+    expected_domains: ["raft.github.io", "wikipedia.org"]
+
+  - query: "Paxos consensus protocol distributed systems"
+    category: systems
+    expected_keywords: ["Paxos", "consensus", "protocol", "distributed"]
+    expected_domains: ["wikipedia.org", "microsoft.com"]
+
+  - query: "epoll kqueue IO multiplexing event loop"
+    category: systems
+    expected_keywords: ["epoll", "kqueue", "IO multiplexing", "event"]
+    expected_domains: ["man7.org", "wikipedia.org"]
+
+  # --- Databases ---
+  - query: "B+ tree index database internal node leaf"
+    category: databases
+    expected_keywords: ["B+ tree", "index", "database", "node"]
+    expected_domains: ["wikipedia.org", "postgresql.org"]
+
+  - query: "ACID transaction isolation levels database"
+    category: databases
+    expected_keywords: ["ACID", "transaction", "isolation", "database"]
+    expected_domains: ["wikipedia.org", "postgresql.org"]
+
+  - query: "MVCC multi version concurrency control snapshot"
+    category: databases
+    expected_keywords: ["MVCC", "concurrency control", "multi version", "snapshot"]
+    expected_domains: ["wikipedia.org", "postgresql.org"]
+
+  - query: "WAL write ahead log database durability crash"
+    category: databases
+    expected_keywords: ["WAL", "write ahead log", "durability", "crash"]
+    expected_domains: ["postgresql.org", "wikipedia.org"]
+
+  - query: "query optimization cost based optimizer plan"
+    category: databases
+    expected_keywords: ["query optimization", "cost based", "optimizer", "plan"]
+    expected_domains: ["postgresql.org", "wikipedia.org"]
+
+  - query: "database replication synchronous asynchronous lag"
+    category: databases
+    expected_keywords: ["replication", "synchronous", "asynchronous", "lag"]
+    expected_domains: ["postgresql.org", "mysql.com"]
+
+  # --- Networking ---
+  - query: "HTTP/2 multiplexing stream server push"
+    category: networking
+    expected_keywords: ["HTTP/2", "multiplexing", "stream", "server push"]
+    expected_domains: ["rfc-editor.org", "wikipedia.org", "cloudflare.com"]
+
+  - query: "QUIC protocol UDP 0-RTT handshake"
+    category: networking
+    expected_keywords: ["QUIC", "UDP", "0-RTT", "handshake"]
+    expected_domains: ["rfc-editor.org", "cloudflare.com", "wikipedia.org"]
+
+  - query: "DNS recursive resolver authoritative server"
+    category: networking
+    expected_keywords: ["DNS", "recursive", "resolver", "authoritative"]
+    expected_domains: ["rfc-editor.org", "wikipedia.org"]
+
+  - query: "load balancing round robin least connections"
+    category: networking
+    expected_keywords: ["load balancing", "round robin", "least connections"]
+    expected_domains: ["nginx.org", "wikipedia.org", "haproxy.org"]
+
+  - query: "TLS 1.3 handshake certificate forward secrecy"
+    category: networking
+    expected_keywords: ["TLS", "handshake", "certificate", "forward secrecy"]
+    expected_domains: ["rfc-editor.org", "wikipedia.org"]
+
+  # --- Security ---
+  - query: "AES GCM authenticated encryption mode"
+    category: security
+    expected_keywords: ["AES", "GCM", "authenticated", "encryption"]
+    expected_domains: ["wikipedia.org", "nist.gov"]
+
+  - query: "OAuth 2.0 authorization code flow PKCE"
+    category: security
+    expected_keywords: ["OAuth", "authorization code", "PKCE"]
+    expected_domains: ["rfc-editor.org", "auth0.com"]
+
+  - query: "SQL injection prevention parameterized query"
+    category: security
+    expected_keywords: ["SQL injection", "parameterized", "prevention"]
+    expected_domains: ["owasp.org", "wikipedia.org"]
+
+  - query: "JWT JSON web token signature verification"
+    category: security
+    expected_keywords: ["JWT", "JSON web token", "signature", "verification"]
+    expected_domains: ["rfc-editor.org", "auth0.com", "jwt.io"]
+
+  - query: "buffer overflow stack canary ASLR protection"
+    category: security
+    expected_keywords: ["buffer overflow", "stack canary", "ASLR"]
+    expected_domains: ["wikipedia.org", "owasp.org"]
+
+  # --- Programming ---
+  - query: "C++ move semantics rvalue reference perfect forwarding"
+    category: programming
+    expected_keywords: ["move semantics", "rvalue", "C++", "perfect forwarding"]
+    expected_domains: ["cppreference.com", "stackoverflow.com"]
+
+  - query: "JVM garbage collection G1 ZGC Shenandoah"
+    category: programming
+    expected_keywords: ["JVM", "garbage collection", "G1", "Java"]
+    expected_domains: ["oracle.com", "wikipedia.org"]
+
+  - query: "Rust trait object dynamic dispatch vtables"
+    category: programming
+    expected_keywords: ["trait", "dynamic dispatch", "Rust", "vtable"]
+    expected_domains: ["doc.rust-lang.org", "rust-lang.org"]
+
+  - query: "Python GIL global interpreter lock threading"
+    category: programming
+    expected_keywords: ["GIL", "global interpreter lock", "Python", "threading"]
+    expected_domains: ["python.org", "realpython.com"]
+
+  - query: "Go context cancellation deadline propagation"
+    category: programming
+    expected_keywords: ["context", "cancellation", "deadline", "Go"]
+    expected_domains: ["go.dev", "golang.org"]
+
+  # --- DevOps ---
+  - query: "Docker multi-stage build reduce image size"
+    category: devops
+    expected_keywords: ["Docker", "multi-stage", "build", "image"]
+    expected_domains: ["docs.docker.com", "stackoverflow.com"]
+
+  - query: "Kubernetes horizontal pod autoscaler HPA metrics"
+    category: devops
+    expected_keywords: ["Kubernetes", "HPA", "autoscaler", "pod"]
+    expected_domains: ["kubernetes.io", "stackoverflow.com"]
+
+  - query: "Prometheus metrics scraping alerting rules"
+    category: devops
+    expected_keywords: ["Prometheus", "metrics", "scraping", "alerting"]
+    expected_domains: ["prometheus.io", "stackoverflow.com"]
+
+  - query: "Terraform infrastructure as code state management"
+    category: devops
+    expected_keywords: ["Terraform", "infrastructure as code", "state"]
+    expected_domains: ["terraform.io", "stackoverflow.com"]
+
+  # --- Academic ---
+  - query: "arxiv paper citation count h-index impact"
+    category: academic
+    expected_keywords: ["arxiv", "citation", "h-index"]
+    expected_domains: ["arxiv.org", "semanticscholar.org"]
+
+  - query: "peer review process academic journal submission"
+    category: academic
+    expected_keywords: ["peer review", "academic", "journal", "submission"]
+    expected_domains: ["wikipedia.org", "nature.com"]
+
+  - query: "systematic review meta-analysis methodology PRISMA"
+    category: academic
+    expected_keywords: ["systematic review", "meta-analysis", "methodology", "PRISMA"]
+    expected_domains: ["wikipedia.org", "ncbi.nlm.nih.gov"]
+
+  - query: "reproducible research open science code data"
+    category: academic
+    expected_keywords: ["reproducible research", "open science", "code", "data"]
+    expected_domains: ["wikipedia.org", "github.com"]

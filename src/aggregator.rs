@@ -15,7 +15,7 @@ use crate::ranking::RankingStrategy;
 
 /// Global engine fan-out deadline. Caps worst-case latency; fast engines
 /// usually return within a few hundred ms, slow ones are cut off here.
-pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_millis(1500);
+pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Fan out to non-suspended engines, dedup by URL, score with `strategy`, sort.
 pub async fn aggregate(
@@ -91,9 +91,9 @@ pub async fn fetch_raw_results(
             // more time, low-quality ones are dropped fast. Capped below the
             // global fan-out deadline.
             let timeout = match engine.weight() {
-                w if w >= 1.5 => Duration::from_millis(1500),
-                w if w >= 1.0 => Duration::from_millis(1000),
-                _ => Duration::from_millis(600),
+                w if w >= 1.5 => Duration::from_secs(4),
+                w if w >= 1.0 => Duration::from_secs(3),
+                _ => Duration::from_secs(2),
             };
             let result = tokio::time::timeout(timeout, engine.search(&q)).await;
             match result {
