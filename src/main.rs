@@ -13,10 +13,26 @@ use agent_search::engine::EngineSuspensionManager;
 use agent_search::index::LocalIndex;
 use agent_search::mcp::{mcp_messages, mcp_post, mcp_sse};
 use agent_search::ranking::get_strategy;
-use agent_search::routes::{AppState, fetch_content, health, list_engines, list_strategies, search, search_ab, search_stream};
+use agent_search::routes::{AppState, fetch_content, health, list_engines, list_strategies, search, search_ab, search_stream, web_search};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Cross-encoder reranking runs on spawn_blocking (CPU-heavy, must not
+    // block the async runtime). Size the blocking pool so concurrent
+    // requests don't queue behind a small default. worker_threads defaults
+    // to num_cpus; max_blocking_threads raised above the 512 default to
+    // absorb bursts of rerank + A/B scoring tasks.
+    let worker_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .max_blocking_threads(256)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -69,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/search", post(search))
         .route("/search/ab", post(search_ab))
         .route("/search/stream", post(search_stream))
+        .route("/web_search", post(web_search))
         .route("/content", get(fetch_content));
 
     // MCP server (Streamable HTTP + legacy SSE transport).

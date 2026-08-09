@@ -147,7 +147,7 @@ pub async fn search_ab(
     // Fetch raw results once, score twice with each strategy.
     let fetch_result = tokio::time::timeout(
         state.request_timeout,
-        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension),
+        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, std::time::Duration::from_secs(3)),
     )
     .await;
 
@@ -261,6 +261,59 @@ pub async fn search_stream(
     });
 
     Sse::new(stream)
+}
+
+/// POST /web_search — simple search endpoint that can replace a relay's
+/// web_search tool backend. Takes `{"query": "..."}` and returns results.
+pub async fn web_search(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let query = match body.get("query").and_then(|v| v.as_str()) {
+        Some(q) => q.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "query is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Upstream first, fall back to local aggregator.
+    let mut results: Vec<crate::models::result::SearchResult> = Vec::new();
+    if let Some(ref upstream) = state.upstream_search_url {
+        results = search_upstream(upstream, state.upstream_api_key.as_deref(), &query).await;
+        if results.is_empty() {
+            tracing::warn!("upstream search returned no results, falling back to local aggregator");
+        }
+    }
+
+    if results.is_empty() {
+        let search_query = SearchQuery {
+            query: query.clone(),
+            ..Default::default()
+        };
+        if let Ok(response) = aggregator::aggregate(
+            &search_query,
+            &state.registry,
+            &state.suspension,
+            state.strategy.clone(),
+        )
+        .await
+        {
+            results = response.results;
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "query": query,
+            "results": results,
+        })),
+    )
+        .into_response()
 }
 
 /// GET /content?url=... — fetch and extract page text.

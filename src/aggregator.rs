@@ -20,7 +20,11 @@ pub async fn aggregate(
     suspension: &EngineSuspensionManager,
     strategy: Arc<dyn RankingStrategy>,
 ) -> EngineResult<SearchResponse> {
-    let (dedup_map, errors) = fetch_raw_results(query, registry, suspension).await;
+    // Global engine fan-out deadline. Matches the high-weight engine timeout.
+    // In practice, fast engines return within a few hundred ms and we return
+    // early once we have enough results.
+    let engine_deadline = Duration::from_secs(3);
+    let (dedup_map, errors) = fetch_raw_results(query, registry, suspension, engine_deadline).await;
 
     if dedup_map.is_empty() && !errors.is_empty() {
         return Err(SearchError::Request("all engines failed".to_string()));
@@ -44,10 +48,17 @@ pub async fn aggregate(
 
 /// Fan out to engines and dedup by URL. Returns (url -> (raw, engines, max_weight), errors).
 /// Shared between `aggregate` and A/B comparison to avoid double upstream calls.
+///
+/// Latency strategy:
+/// - Per-engine timeout scales with engine weight (high-weight engines get more time).
+/// - Returns early once we have enough deduped results (>= 10), so slow engines
+///   don't inflate tail latency for queries where fast engines already cover it.
+/// - Hard global deadline caps worst-case latency.
 pub async fn fetch_raw_results(
     query: &SearchQuery,
     registry: &EngineRegistry,
     suspension: &EngineSuspensionManager,
+    deadline: Duration,
 ) -> (
     HashMap<String, (RawSearchResult, Vec<String>, f32)>,
     Vec<EngineErrorInfo>,
@@ -76,7 +87,13 @@ pub async fn fetch_raw_results(
         let q = query.clone();
         tasks.spawn(async move {
             let name = engine.name().to_string();
-            let timeout = Duration::from_secs(engine.timeout());
+            // Per-engine timeout based on weight: high-quality engines get
+            // more time, low-quality ones are dropped fast.
+            let timeout = match engine.weight() {
+                w if w >= 1.5 => Duration::from_secs(3),
+                w if w >= 1.0 => Duration::from_millis(1500),
+                _ => Duration::from_millis(800),
+            };
             let result = tokio::time::timeout(timeout, engine.search(&q)).await;
             match result {
                 Ok(res) => (name, res),
@@ -88,36 +105,60 @@ pub async fn fetch_raw_results(
     let mut dedup_map: HashMap<String, (RawSearchResult, Vec<String>, f32)> = HashMap::new();
     let mut errors: Vec<EngineErrorInfo> = Vec::new();
 
-    while let Some(Ok((engine_name, result))) = tasks.join_next().await {
-        match result {
-            Ok(raw_results) => {
-                suspension.record_success(&engine_name);
-                let engine_weight = *weights.get(&engine_name).unwrap_or(&1.0);
-                for raw in raw_results {
-                    let key = normalize_url(&raw.url);
-                    match dedup_map.get_mut(&key) {
-                        Some((_, engines, weight)) => {
-                            engines.push(engine_name.clone());
-                            *weight = weight.max(engine_weight);
-                        }
-                        None => {
-                            dedup_map.insert(key, (raw, vec![engine_name.clone()], engine_weight));
+    // Minimum results before we stop waiting for slow engines.
+    const MIN_RESULTS: usize = 10;
+
+    let deadline = tokio::time::Instant::now() + deadline;
+    loop {
+        let next = tasks.join_next();
+        match tokio::time::timeout_at(deadline, next).await {
+            Ok(Some(Ok((engine_name, result)))) => {
+                match result {
+                    Ok(raw_results) => {
+                        suspension.record_success(&engine_name);
+                        let engine_weight = *weights.get(&engine_name).unwrap_or(&1.0);
+                        for raw in raw_results {
+                            let key = normalize_url(&raw.url);
+                            match dedup_map.get_mut(&key) {
+                                Some((_, engines, weight)) => {
+                                    engines.push(engine_name.clone());
+                                    *weight = weight.max(engine_weight);
+                                }
+                                None => {
+                                    dedup_map.insert(key, (raw, vec![engine_name.clone()], engine_weight));
+                                }
+                            }
                         }
                     }
+                    Err(e) => {
+                        let suspended = suspension.record_error(&engine_name, &e);
+                        let error_msg = if let Some(dur) = suspended {
+                            format!("{} (suspended for {}s)", e, dur.as_secs())
+                        } else {
+                            e.to_string()
+                        };
+                        tracing::warn!(engine = %engine_name, error = %e, "engine error");
+                        errors.push(EngineErrorInfo {
+                            engine: engine_name,
+                            error: error_msg,
+                        });
+                    }
+                }
+
+                // Enough results: stop waiting for slow engines.
+                if dedup_map.len() >= MIN_RESULTS {
+                    tasks.abort_all();
+                    break;
                 }
             }
-            Err(e) => {
-                let suspended = suspension.record_error(&engine_name, &e);
-                let error_msg = if let Some(dur) = suspended {
-                    format!("{} (suspended for {}s)", e, dur.as_secs())
-                } else {
-                    e.to_string()
-                };
-                tracing::warn!(engine = %engine_name, error = %e, "engine error");
-                errors.push(EngineErrorInfo {
-                    engine: engine_name,
-                    error: error_msg,
-                });
+            // Task panicked or was aborted.
+            Ok(Some(Err(_))) => {}
+            // JoinSet empty — all engines responded.
+            Ok(None) => break,
+            // Global deadline hit.
+            Err(_) => {
+                tasks.abort_all();
+                break;
             }
         }
     }

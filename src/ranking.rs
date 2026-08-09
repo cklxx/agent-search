@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 
@@ -354,6 +354,13 @@ impl BgeRerankerStrategy {
         let mut options = RerankInitOptions::default();
         options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
         options.cache_dir = std::path::PathBuf::from("models");
+        // One thread per instance: with N pool instances we get N-way
+        // parallelism without oversubscribing the CPU.
+        options.intra_threads = Some(1);
+        // Cap sequence length to keep rerank latency and memory bounded.
+        // 1024 chars ≈ 256–512 tokens; 512 tokens gives the cross-encoder
+        // enough context for technical content without blowing up memory.
+        options.max_length = 512;
         TextRerank::try_new(options)
     }
 }
@@ -377,7 +384,7 @@ impl RankingStrategy for BgeRerankerStrategy {
             return Vec::new();
         }
 
-        const TOP_N: usize = 30;
+        const TOP_N: usize = 50;
         const REBUILD_EVERY: u64 = 50;
 
         let bm25_scores: Vec<f32> = items
@@ -399,7 +406,7 @@ impl RankingStrategy for BgeRerankerStrategy {
             .map(|&i| {
                 let (raw, _, _) = &items[i];
                 let doc = format!("{} {} {}", raw.title, raw.url, raw.snippet);
-                doc.chars().take(512).collect()
+                doc.chars().take(1024).collect()
             })
             .collect();
 
@@ -461,6 +468,11 @@ fn query_coverage(document: &str, query: &SearchQuery) -> f32 {
     matched / query_terms.len() as f32
 }
 
+/// Cached bge_reranker instance. Loading the model pool is expensive
+/// (~2.4GB for 8 instances), so we build it once and reuse it across
+/// /search/ab requests.
+static BGE_RERANKER: OnceLock<Option<Arc<dyn RankingStrategy>>> = OnceLock::new();
+
 pub fn get_strategy(name: &str) -> Option<Arc<dyn RankingStrategy>> {
     match name {
         "bm25" => Some(Arc::new(Bm25Strategy)),
@@ -469,13 +481,18 @@ pub fn get_strategy(name: &str) -> Option<Arc<dyn RankingStrategy>> {
         "engine_weight" => Some(Arc::new(EngineWeightStrategy)),
         "bm25_title_boost" => Some(Arc::new(Bm25TitleBoostStrategy)),
         "searxng_only" => Some(Arc::new(SearxngOnlyStrategy)),
-        "bge_reranker" => match BgeRerankerStrategy::new() {
-            Ok(s) => Some(Arc::new(s)),
-            Err(e) => {
-                eprintln!("Failed to load jina-reranker-v2: {}", e);
-                None
-            }
-        },
+        "bge_reranker" => {
+            let cached = BGE_RERANKER.get_or_init(|| {
+                match BgeRerankerStrategy::new() {
+                    Ok(s) => Some(Arc::new(s)),
+                    Err(e) => {
+                        eprintln!("Failed to load jina-reranker-v2: {}", e);
+                        None
+                    }
+                }
+            });
+            cached.clone()
+        }
         _ => None,
     }
 }
