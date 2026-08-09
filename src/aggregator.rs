@@ -15,7 +15,7 @@ use crate::ranking::RankingStrategy;
 
 /// Global engine fan-out deadline. Caps worst-case latency; fast engines
 /// usually return within a few hundred ms, slow ones are cut off here.
-pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_secs(5);
+pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Fan out to non-suspended engines, dedup by URL, score with `strategy`, sort.
 pub async fn aggregate(
@@ -91,9 +91,9 @@ pub async fn fetch_raw_results(
             // more time, low-quality ones are dropped fast. Capped below the
             // global fan-out deadline.
             let timeout = match engine.weight() {
-                w if w >= 1.5 => Duration::from_secs(4),
-                w if w >= 1.0 => Duration::from_secs(3),
-                _ => Duration::from_secs(2),
+                w if w >= 1.5 => Duration::from_secs(8),
+                w if w >= 1.0 => Duration::from_secs(6),
+                _ => Duration::from_secs(4),
             };
             let result = tokio::time::timeout(timeout, engine.search(&q)).await;
             match result {
@@ -106,11 +106,9 @@ pub async fn fetch_raw_results(
     let mut dedup_map: HashMap<String, (RawSearchResult, Vec<String>, f32)> = HashMap::new();
     let mut errors: Vec<EngineErrorInfo> = Vec::new();
 
-    // Minimum results before we stop waiting for slow engines.
-    // Cap at 20 to avoid waiting too long; floor at 5 so the reranker has
-    // enough candidates even for small max_results.
-    let min_results = query.max_results.clamp(5, 20);
-
+    // Wait for all engines to respond (or hit the global deadline).
+    // Early-return on result count was removed: a single fast engine returning
+    // many low-quality results would abort slower, higher-quality engines.
     let deadline = tokio::time::Instant::now() + deadline;
     loop {
         let next = tasks.join_next();
@@ -120,6 +118,7 @@ pub async fn fetch_raw_results(
                     Ok(raw_results) => {
                         suspension.record_success(&engine_name);
                         let engine_weight = *weights.get(&engine_name).unwrap_or(&1.0);
+                        tracing::debug!(engine = %engine_name, count = raw_results.len(), "engine returned results");
                         for raw in raw_results {
                             let key = normalize_url(&raw.url);
                             match dedup_map.get_mut(&key) {
@@ -147,18 +146,9 @@ pub async fn fetch_raw_results(
                         });
                     }
                 }
-
-                // Enough results: stop waiting for slow engines.
-                if dedup_map.len() >= min_results {
-                    tasks.abort_all();
-                    break;
-                }
             }
-            // Task panicked or was aborted.
             Ok(Some(Err(_))) => {}
-            // JoinSet empty — all engines responded.
             Ok(None) => break,
-            // Global deadline hit.
             Err(_) => {
                 tasks.abort_all();
                 break;

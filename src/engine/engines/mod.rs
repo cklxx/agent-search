@@ -79,7 +79,15 @@ pub fn register_from_config(
         Ok(mut configs) => {
             let key = stackexchange_api_key.unwrap_or("");
             for config in &mut configs {
-                config.search_url = config.search_url.replace("{api_key}", key);
+                if key.is_empty() {
+                    // No API key: remove the key parameter entirely to avoid
+                    // sending `key=` which Stack Exchange rejects.
+                    config.search_url = config.search_url.replace("&key={api_key}", "");
+                    config.search_url = config.search_url.replace("key={api_key}&", "");
+                    config.search_url = config.search_url.replace("?key={api_key}", "");
+                } else {
+                    config.search_url = config.search_url.replace("{api_key}", key);
+                }
             }
             for config in configs {
                 let engine = ConfigurableEngine::new(config, proxy_manager.clone());

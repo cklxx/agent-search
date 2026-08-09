@@ -79,31 +79,20 @@ impl LocalIndex {
         let reader = self.index.reader().ok()?;
         let searcher = reader.searcher();
 
-        // First, try exact match on the query field (cached results).
+        // Exact match on the query field. The LocalIndex stores results keyed
+        // by the exact query that produced them; a full-text fallback would
+        // return stale results from unrelated queries.
         let query_parser = QueryParser::for_index(&self.index, vec![self.query_field]);
-        if let Ok(parsed_query) = query_parser.parse_query(query) {
-            if let Ok(top_docs) = searcher.search(&parsed_query, &TopDocs::with_limit(DEFAULT_SEARCH_LIMIT)) {
-                if !top_docs.is_empty() {
-                    return Some(self.collect_results(&searcher, top_docs));
-                }
-            }
+        let parsed_query = query_parser.parse_query(query).ok()?;
+        let top_docs = searcher
+            .search(&parsed_query, &TopDocs::with_limit(DEFAULT_SEARCH_LIMIT))
+            .ok()?;
+
+        if top_docs.is_empty() {
+            return None;
         }
 
-        // Fallback: full-text search across title, snippet, and url fields.
-        // This acts as a local search index when upstream engines are unavailable.
-        let text_parser = QueryParser::for_index(
-            &self.index,
-            vec![self.title_field, self.snippet_field, self.url_field],
-        );
-        if let Ok(parsed_query) = text_parser.parse_query(query) {
-            if let Ok(top_docs) = searcher.search(&parsed_query, &TopDocs::with_limit(DEFAULT_SEARCH_LIMIT)) {
-                if !top_docs.is_empty() {
-                    return Some(self.collect_results(&searcher, top_docs));
-                }
-            }
-        }
-
-        None
+        Some(self.collect_results(&searcher, top_docs))
     }
 
     fn collect_results(
