@@ -49,6 +49,15 @@ impl ConfigurableEngine {
             SearchError::Parse("html selectors not configured".to_string())
         })?;
 
+        // Base URL for resolving relative hrefs (scheme + host from search_url).
+        let base_url = self
+            .config
+            .search_url
+            .split('/')
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("/");
+
         let doc = Html::parse_document(body);
         let results_sel = Selector::parse(&selectors.results)
             .map_err(|e| SearchError::Parse(e.to_string()))?;
@@ -71,12 +80,21 @@ impl ConfigurableEngine {
                 .map(|e| e.text().collect::<String>().trim().to_string())
                 .unwrap_or_default();
 
-            let url = item
+            let href = item
                 .select(&url_sel)
                 .next()
                 .and_then(|e| e.value().attr("href"))
                 .unwrap_or("")
                 .to_string();
+
+            // Resolve relative URLs against the engine's base URL.
+            let url = if href.starts_with("http") {
+                href
+            } else if href.starts_with('/') {
+                format!("{}{}", base_url, href)
+            } else {
+                href
+            };
 
             let snippet = content_sel
                 .as_ref()

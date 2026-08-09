@@ -458,18 +458,6 @@
     url: html_url
     title: title
     content: body
-- name: techcrunch
-  type: html
-  categories:
-  - news
-  - it
-  weight: 1.2
-  search_url: https://techcrunch.com/search/{query}
-  html:
-    results: .loop-card
-    url: .loop-card__title-link
-    title: .loop-card__title-link
-    content: .loop-card__cat
 - name: bilibili
   type: json
   categories:
