@@ -20,6 +20,7 @@ const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 
 pub struct ConfigurableEngine {
     config: EngineConfig,
+    domain: String,
     pool_clients: Vec<Client>,
     default_client: Client,
     proxy_manager: Option<Arc<ProxyManager>>,
@@ -30,6 +31,9 @@ impl ConfigurableEngine {
     pub fn new(config: EngineConfig, proxy_manager: Option<Arc<ProxyManager>>) -> Self {
         let headers = build_headers(&config);
 
+        // Domain (scheme + host) for per-domain rate limiting.
+        let domain = extract_domain(&config.search_url);
+
         // Engine-specific proxy: wrap as a single-element pool.
         let proxy_manager = match &config.proxy {
             Some(url) => Some(Arc::new(ProxyManager::new(vec![url.clone()]))),
@@ -38,7 +42,7 @@ impl ConfigurableEngine {
 
         let (pool_clients, default_client, proxy_manager) =
             build_pool_clients(DEFAULT_USER_AGENT, &headers, proxy_manager);
-        Self { config, pool_clients, default_client, proxy_manager }
+        Self { config, domain, pool_clients, default_client, proxy_manager }
     }
 
     fn client(&self) -> &Client {
@@ -51,13 +55,7 @@ impl ConfigurableEngine {
         })?;
 
         // Base URL for resolving relative hrefs (scheme + host from search_url).
-        let base_url = self
-            .config
-            .search_url
-            .split('/')
-            .take(3)
-            .collect::<Vec<_>>()
-            .join("/");
+        let base_url = &self.domain;
 
         let doc = Html::parse_document(body);
         let results_sel = Selector::parse(&selectors.results)
@@ -290,6 +288,10 @@ impl SearchEngine for ConfigurableEngine {
         self.config.weight
     }
 
+    fn domain(&self) -> &str {
+        &self.domain
+    }
+
     async fn search(&self, query: &SearchQuery) -> EngineResult<Vec<RawSearchResult>> {
         let url = self.config.build_url(
             &query.query,
@@ -348,4 +350,22 @@ fn get_json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a ser
         return Some(value);
     }
     value.pointer(&format!("/{}", path))
+}
+
+/// Extract scheme + host from a URL template, e.g.
+/// "https://api.stackexchange.com/2.3/search?..." -> "https://api.stackexchange.com".
+/// Falls back to the original string if parsing fails.
+fn extract_domain(search_url: &str) -> String {
+    match url::Url::parse(search_url) {
+        Ok(u) => {
+            let scheme = u.scheme();
+            let host = u.host_str().unwrap_or("");
+            if host.is_empty() {
+                search_url.to_string()
+            } else {
+                format!("{}://{}", scheme, host)
+            }
+        }
+        Err(_) => search_url.split('/').take(3).collect::<Vec<_>>().join("/"),
+    }
 }

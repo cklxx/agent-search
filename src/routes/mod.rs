@@ -12,7 +12,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::aggregator;
 use crate::cache::{QueryCache, cache_key};
-use crate::engine::{EngineRegistry, EngineSuspensionManager};
+use crate::dedup::DedupService;
+use crate::engine::{DomainRateLimiter, EngineRegistry, EngineSuspensionManager};
 use crate::index::LocalIndex;
 use crate::models::error::{ApiError, ErrorCode};
 use crate::models::query::SearchQuery;
@@ -24,6 +25,7 @@ pub struct AppState {
     pub cache: QueryCache,
     pub suspension: Arc<EngineSuspensionManager>,
     pub local_index: Arc<LocalIndex>,
+    pub dedup: Arc<DedupService>,
     pub strategy: Arc<dyn RankingStrategy>,
     pub request_timeout: std::time::Duration,
     pub upstream_search_url: Option<String>,
@@ -31,6 +33,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Shared across all requests to bound total upstream engine concurrency.
     pub engine_semaphore: Arc<Semaphore>,
+    /// Per-domain concurrency limit to avoid 429s from shared upstream hosts.
+    pub domain_rate_limiter: Arc<DomainRateLimiter>,
 }
 
 /// Try upstream search first; fall back to the local aggregator on empty results.
@@ -59,7 +63,7 @@ pub async fn search_with_fallback(
 
     match tokio::time::timeout(
         state.request_timeout,
-        aggregator::aggregate(query, &state.registry, &state.suspension, state.strategy.clone(), &state.engine_semaphore),
+        aggregator::aggregate(query, &state.registry, &state.suspension, state.strategy.clone(), &state.engine_semaphore, &state.domain_rate_limiter),
     )
     .await
     {
@@ -163,7 +167,7 @@ async fn crawl_result_pages(state: &AppState, results: &[crate::models::result::
             match crate::crawler::fetch_and_extract(&state.http_client, &url).await {
                 Ok((title, content)) => {
                     if !content.is_empty() {
-                        let _ = state.local_index.index_page(&url, &title, &content);
+                        let _ = state.local_index.index_page(&url, &title, &content, &state.dedup);
                         tracing::debug!(url = %url, len = content.len(), "crawled and indexed page");
                     }
                 }
@@ -218,7 +222,7 @@ pub async fn search_ab(
 
     let fetch_result = tokio::time::timeout(
         state.request_timeout,
-        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, aggregator::ENGINE_FANOUT_DEADLINE, &state.engine_semaphore),
+        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, aggregator::ENGINE_FANOUT_DEADLINE, &state.engine_semaphore, &state.domain_rate_limiter),
     )
     .await;
 
@@ -295,11 +299,12 @@ pub async fn search_stream(
     let strategy = state.strategy.clone();
     let request_timeout = state.request_timeout;
     let semaphore = state.engine_semaphore.clone();
+    let domain_rate_limiter = state.domain_rate_limiter.clone();
 
     tokio::spawn(async move {
         let response = tokio::time::timeout(
             request_timeout,
-            aggregator::aggregate(&query, &registry, &suspension, strategy.clone(), &semaphore),
+            aggregator::aggregate(&query, &registry, &suspension, strategy.clone(), &semaphore, &domain_rate_limiter),
         )
         .await;
 
@@ -420,7 +425,7 @@ pub async fn crawl_url(
     match crate::crawler::fetch_and_extract(&state.http_client, &url).await {
         Ok((title, content)) => {
             let len = content.len();
-            let _ = state.local_index.index_page(&url, &title, &content);
+            let _ = state.local_index.index_page(&url, &title, &content, &state.dedup);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({

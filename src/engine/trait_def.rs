@@ -11,6 +11,12 @@ pub trait SearchEngine: Send + Sync {
     fn name(&self) -> &str;
     fn categories(&self) -> &[String];
 
+    /// Domain (scheme + host) of the engine's search_url, e.g. "https://api.stackexchange.com".
+    /// Used for per-domain concurrency limiting.
+    fn domain(&self) -> &str {
+        ""
+    }
+
     fn timeout(&self) -> u64 {
         10
     }

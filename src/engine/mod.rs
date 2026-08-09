@@ -2,12 +2,14 @@
 
 pub mod config;
 pub mod configurable;
+pub mod domain_rate_limit;
 pub mod engines;
 pub mod suspension;
 pub mod trait_def;
 
 pub use config::*;
 pub use configurable::ConfigurableEngine;
+pub use domain_rate_limit::{DomainRateLimiter, DEFAULT_MAX_PER_DOMAIN};
 pub use suspension::EngineSuspensionManager;
 pub use trait_def::*;
 

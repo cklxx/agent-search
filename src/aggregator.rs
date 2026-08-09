@@ -8,7 +8,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::dedup::normalize_url;
-use crate::engine::{EngineRef, EngineRegistry, EngineSuspensionManager};
+use crate::engine::{DomainRateLimiter, EngineRef, EngineRegistry, EngineSuspensionManager};
 use crate::models::error::{EngineResult, SearchError};
 use crate::models::query::{SearchQuery, infer_categories};
 use crate::models::result::{EngineErrorInfo, RawSearchResult, SearchResponse, SearchResult};
@@ -29,8 +29,17 @@ pub async fn aggregate(
     suspension: &EngineSuspensionManager,
     strategy: Arc<dyn RankingStrategy>,
     semaphore: &Arc<Semaphore>,
+    domain_rate_limiter: &Arc<DomainRateLimiter>,
 ) -> EngineResult<SearchResponse> {
-    let (dedup_map, errors) = fetch_raw_results(query, registry, suspension, ENGINE_FANOUT_DEADLINE, semaphore).await;
+    let (dedup_map, errors) = fetch_raw_results(
+        query,
+        registry,
+        suspension,
+        ENGINE_FANOUT_DEADLINE,
+        semaphore,
+        domain_rate_limiter,
+    )
+    .await;
 
     tracing::debug!(dedup_count = dedup_map.len(), error_count = errors.len(), "fetch_raw_results complete");
 
@@ -70,6 +79,7 @@ pub async fn fetch_raw_results(
     suspension: &EngineSuspensionManager,
     deadline: Duration,
     semaphore: &Arc<Semaphore>,
+    domain_rate_limiter: &Arc<DomainRateLimiter>,
 ) -> (
     HashMap<String, (RawSearchResult, Vec<String>, f32)>,
     Vec<EngineErrorInfo>,
@@ -97,7 +107,14 @@ pub async fn fetch_raw_results(
         let engine = engine.clone();
         let q = query.clone();
         let sem = semaphore.clone();
+        let drl = domain_rate_limiter.clone();
+        let domain = engine.domain().to_string();
         tasks.spawn(async move {
+            // Per-domain concurrency limit: serialize requests to the same
+            // upstream domain so multiple engines sharing a host (e.g. the
+            // Stack Exchange API) don't trip 429s.
+            let _domain_permit = drl.acquire(&domain).await;
+
             let _permit = match sem.acquire().await {
                 Ok(p) => p,
                 Err(_) => return (engine.name().to_string(), Err(SearchError::Timeout)),

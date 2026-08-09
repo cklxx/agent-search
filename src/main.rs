@@ -82,12 +82,14 @@ async fn async_main() -> anyhow::Result<()> {
         cache,
         suspension,
         local_index,
+        dedup: Arc::new(agent_search::dedup::DedupService::new()),
         strategy,
         request_timeout,
         upstream_search_url: config.upstream_search_url.clone(),
         upstream_api_key: config.upstream_api_key.clone(),
         http_client,
         engine_semaphore: Arc::new(tokio::sync::Semaphore::new(agent_search::aggregator::MAX_CONCURRENT_ENGINES)),
+        domain_rate_limiter: Arc::new(agent_search::engine::DomainRateLimiter::default()),
     };
 
     // Warmup: preheat the ranking model and populate caches for common queries.
@@ -162,6 +164,7 @@ async fn warmup(state: &AppState, queries: &[String]) {
             &state.suspension,
             state.strategy.clone(),
             &state.engine_semaphore,
+            &state.domain_rate_limiter,
         )
         .await
         {

@@ -1,81 +1,134 @@
-# Agent-Search Architecture: DX & Agent-Friendly Optimization
+# 搜索引擎全链路架构
 
-## Current State
+## 请求链路（同步）
 
-- Multi-engine search aggregator (SearXNG + 80+ engines from engines.yaml)
-- BM25F coarse ranking + jina-reranker-v2 cross-encoder fine ranking
-- MCP server at `/mcp` with `web_search` tool
-- HTTP endpoints: `/search`, `/web_search`, `/search/ab`, `/search/stream`, `/content`
-- Upstream super-relay fallback for search
-- Engine suspension with exponential backoff
+```
+用户查询
+   │
+   ▼
+┌─────────────────────────────────────────────┐
+│ 1. QueryCache (moka)                         │
+│    精确匹配 query:page:max_results            │
+└──────────────┬──────────────────────────────┘
+               │ miss
+               ▼
+┌─────────────────────────────────────────────┐
+│ 2. 本地精确查询缓存 (search_cached)           │
+│    Tantivy STRING 字段精确匹配 query          │
+└──────────────┬──────────────────────────────┘
+               │ miss
+               ▼
+┌─────────────────────────────────────────────┐
+│ 3. 本地全文索引 (search_fulltext)            │
+│    Tantivy BM25 over title + content         │
+│    CJK 2-gram 分词                            │
+│    命中 ≥3 条则直接返回                        │
+└──────────────┬──────────────────────────────┘
+               │ miss
+               ▼
+┌─────────────────────────────────────────────┐
+│ 4. 召回 (Recall)                             │
+│    ┌──────────────────────────────────────┐  │
+│    │ 外部引擎聚合 (fetch_raw_results)      │  │
+│    │  - SearXNG (general)                 │  │
+│    │  - 垂直引擎 (GitHub/StackExchange/…) │  │
+│    │  - 域名级限流 (DomainRateLimiter)    │  │
+│    │  - 全局并发限流 (Semaphore)          │  │
+│    └──────────────────────────────────────┘  │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│ 5. 去重 (DedupService)                       │
+│    normalize_url: 小写 host / 去跟踪参数 /    │
+│    去尾斜杠 / 解包 archive 快照               │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│ 6. 粗排 (Coarse Ranking)                     │
+│    BM25F (title×3 + url×1.5 + snippet×1)    │
+│    × 位置衰减 (1/log2(pos+1))                │
+│    × 引擎权重                                │
+│    × 域名权威度 (白名单/黑名单)               │
+│    × 时效性 (exp(-age/180d))                 │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│ 7. 精排 (Fine Ranking)                       │
+│    bge_reranker (jina-reranker-v2)           │
+│    cross-encoder, 512 tokens                 │
+│    取粗排 top-50 送入精排                     │
+│    score = authority² × relevance × coverage │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+          返回结果 (max_results)
+```
 
-## Target: SOTA Agent-Friendly Service
+## 建库链路（异步）
 
-### 1. Error Model (RFC 9457 + MCP isError)
+```
+搜索返回 top-5 结果
+   │
+   ▼
+┌─────────────────────────────────────────────┐
+│ 爬虫 (crawler::fetch_and_extract)            │
+│  - HTTP GET (浏览器 UA)                       │
+│  - 正文提取 (readability 评分)                │
+│    · 移除 script/style/nav/header/footer      │
+│    · 评分: text_len×(1-link_density)          │
+│           + punctuation×10 - link_count×10   │
+│    · 保留段落换行和 <pre> 代码块              │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│ 去重 (DedupService.insert)                   │
+│    已索引的 URL 跳过                          │
+└──────────────┬──────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────┐
+│ 建库 (LocalIndex::index_page)                │
+│    Tantivy 索引                              │
+│    - title: CJK 2-gram TEXT                  │
+│    - content: CJK 2-gram TEXT                │
+│    - url: TEXT STORED                        │
+│    - engine: "local"                         │
+└─────────────────────────────────────────────┘
+```
 
-**Current:** `SearchError` enum → `{"error": "..."}` string.
+## 关键组件
 
-**Target:**
-- HTTP: `application/problem+json` with `type`, `title`, `status`, `detail`, `instance`, `invalid_params[]`
-- MCP tool: `isError: true` with `error_code`, `field`, `message`, `example`
-- Error codes: `VALIDATION_ERROR`, `NOT_FOUND`, `TIMEOUT`, `UPSTREAM_ERROR`, `INTERNAL_ERROR`, `ENGINE_SUSPENDED`
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| QueryCache | `src/cache.rs` | 精确查询缓存 (moka, TTL) |
+| LocalIndex | `src/index.rs` | Tantivy 全文索引 + 精确查询缓存 |
+| DedupService | `src/dedup.rs` | URL 规范化 + 去重 |
+| DomainRateLimiter | `src/engine/domain_rate_limit.rs` | 域名级并发限流 |
+| EngineSuspensionManager | `src/engine/suspension.rs` | 引擎错误退避 |
+| aggregator | `src/aggregator.rs` | 召回 + 去重 + 粗排 |
+| RankingStrategy | `src/ranking.rs` | 粗排 (BM25) + 精排 (bge_reranker) |
+| crawler | `src/crawler.rs` | 页面爬取 + 正文提取 |
 
-### 2. MCP Tool Schema
+## 排序公式
 
-**Current:** `web_search` takes `{query: string}`, no `additionalProperties: false`.
+### 粗排 (BM25)
+```
+score = normalize(
+    bm25f × position_weight × engine_weight × authority × freshness
+)
 
-**Target:**
-- `additionalProperties: false` on all objects
-- `input_examples` for the query parameter
-- Description passes Intern Test: what it does, when to use, params, output
+bm25f = Σ term [ tf × (k1+1) / (tf + k1) ] × (0.5 + 0.5×coverage)
+tf = tf_title×3 + tf_url×1.5 + tf_snippet×1
+position_weight = 1 / log2(pos+1)
+freshness = 0.5 ^ (age_days / 180)
+```
 
-### 3. Streaming (SSE)
-
-**Current:** Raw JSON strings, no event types, no sentinel.
-
-**Target:**
-- Typed events: `event: result`, `event: done`, `event: error`
-- Terminal sentinel: `event: done` (not connection close)
-- Heartbeats: `: ping` every 15s
-- In-band `error` events with `code` + `message`
-
-### 4. HTTP Conventions
-
-**Current:** Inconsistent error shapes, no idempotency.
-
-**Target:**
-- All errors use RFC 9457 format
-- 422 for validation with `invalid_params`
-- 400 for bad request, 504 for upstream timeout, 502 for upstream error
-
-### 5. Response Design
-
-**Current:** Full results with score, engines, published_date.
-
-**Target:**
-- High-signal by default (title, url, snippet, score)
-- Bounded size (already truncates to max_results)
-- `engines` field kept for transparency
-
-### 6. Observability
-
-**Current:** Basic tracing logs.
-
-**Target:**
-- `x-trace-id` header on every response (generated if not provided)
-- Structured logging with trace_id, query, engine, duration
-
-## File Changes
-
-| File | Change |
-|------|--------|
-| `src/models/error.rs` | Add `ApiError` (RFC 9457), `ToolError`, error codes, `IntoResponse` impl |
-| `src/mcp.rs` | Strict schema, `input_examples`, Intern Test description, `isError` structured errors |
-| `src/routes/mod.rs` | RFC 9457 errors, typed SSE events, heartbeats, terminal sentinel |
-| `src/main.rs` | Add trace-id middleware |
-| `tests/e2e.rs` | E2E tests for all endpoints, error cases, MCP, streaming |
-
-## Non-Goals
-
-- Changing ranking strategy or engine config
-- Removing the `/v1/chat/completions` and `/v1/messages` proxy endpoints (kept as-is)
+### 精排 (bge_reranker)
+```
+score = clamp(authority² × sigmoid(cross_encoder_score) × coverage, 0, 1)
+coverage = matched_query_terms / total_query_terms
+```

@@ -119,7 +119,7 @@ pub trait RankingStrategy: Send + Sync {
     }
 }
 
-/// BM25 (simplified: TF, no IDF) × position × engine weight × domain authority. Default.
+/// BM25 (simplified: TF, no IDF) × position × engine weight × domain authority × freshness. Default.
 pub struct Bm25Strategy;
 
 impl RankingStrategy for Bm25Strategy {
@@ -133,9 +133,22 @@ impl RankingStrategy for Bm25Strategy {
         // differences don't overwhelm relevance and authority signals.
         let position_weight = 1.0 / (raw.position as f32 + 1.0).log2();
         let authority = domain_authority(&raw.url);
-        let score = bm25 * position_weight * engine_weight * authority;
+        let freshness = freshness_weight(raw.published_date);
+        let score = bm25 * position_weight * engine_weight * authority * freshness;
         normalize(score)
     }
+}
+
+/// Exponential time decay: newer content ranks higher.
+/// Half-life of 180 days: content 6 months old scores ~0.5, 1 year old ~0.25.
+fn freshness_weight(published: Option<chrono::DateTime<chrono::Utc>>) -> f32 {
+    let Some(pub_date) = published else {
+        // No date: neutral weight.
+        return 1.0;
+    };
+    let age_days = (chrono::Utc::now() - pub_date).num_days().max(0) as f32;
+    let half_life = 180.0;
+    (0.5_f32).powf(age_days / half_life)
 }
 
 fn bm25_score(raw: &RawSearchResult, query: &SearchQuery) -> f32 {
@@ -151,14 +164,13 @@ fn bm25_score(raw: &RawSearchResult, query: &SearchQuery) -> f32 {
     const URL_W: f32 = 1.5;
     const SNIPPET_W: f32 = 1.0;
 
-    // Deduplicate query terms.
-    let query_terms: Vec<&str> = {
+    // Deduplicate query terms. Use the same tokenizer as document fields so
+    // Chinese 2-grams match between query and document.
+    let query_terms: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
-        query
-            .query
-            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-            .filter(|t| !t.is_empty())
-            .filter(|t| seen.insert(t.to_lowercase()))
+        tokenize(&query.query)
+            .into_iter()
+            .filter(|t| seen.insert(t.clone()))
             .collect()
     };
     if query_terms.is_empty() {
@@ -168,11 +180,10 @@ fn bm25_score(raw: &RawSearchResult, query: &SearchQuery) -> f32 {
     let mut score = 0.0;
     let mut matched_terms = 0;
     for term in &query_terms {
-        let term_lower = term.to_lowercase();
         // Weighted term frequency across fields (BM25F).
-        let tf_title = title_tokens.iter().filter(|t| **t == term_lower).count() as f32;
-        let tf_url = url_tokens.iter().filter(|t| **t == term_lower).count() as f32;
-        let tf_snippet = snippet_tokens.iter().filter(|t| **t == term_lower).count() as f32;
+        let tf_title = title_tokens.iter().filter(|t| *t == term).count() as f32;
+        let tf_url = url_tokens.iter().filter(|t| *t == term).count() as f32;
+        let tf_snippet = snippet_tokens.iter().filter(|t| *t == term).count() as f32;
         let tf = tf_title * TITLE_W + tf_url * URL_W + tf_snippet * SNIPPET_W;
 
         if tf > 0.0 {
@@ -187,11 +198,30 @@ fn bm25_score(raw: &RawSearchResult, query: &SearchQuery) -> f32 {
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-        .filter(|t| !t.is_empty())
-        .map(|s| s.to_string())
-        .collect()
+    let mut tokens = Vec::new();
+    let lower = text.to_lowercase();
+
+    // Split on whitespace and ASCII punctuation, then handle CJK runs with
+    // character 2-grams. ASCII words are kept as-is (after lowercasing).
+    for segment in lower.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()) {
+        if segment.is_empty() {
+            continue;
+        }
+        if segment.is_ascii() {
+            tokens.push(segment.to_string());
+        } else {
+            // CJK or mixed: emit 2-character grams so Chinese queries match.
+            let chars: Vec<char> = segment.chars().collect();
+            if chars.len() == 1 {
+                tokens.push(chars[0].to_string());
+            } else {
+                for w in chars.windows(2) {
+                    tokens.push(format!("{}{}", w[0], w[1]));
+                }
+            }
+        }
+    }
+    tokens
 }
 
 /// Normalize a non-negative score to [0, 1) while preserving order.
@@ -212,13 +242,11 @@ impl RankingStrategy for TfIdfStrategy {
         let tokens = tokenize(&format!("{} {} {}", raw.title, raw.url, raw.snippet));
         let doc_len = tokens.len().max(1) as f32;
 
-        let query_terms: Vec<&str> = {
+        let query_terms: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
-            query
-                .query
-                .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-                .filter(|t| !t.is_empty())
-                .filter(|t| seen.insert(t.to_lowercase()))
+            tokenize(&query.query)
+                .into_iter()
+                .filter(|t| seen.insert(t.clone()))
                 .collect()
         };
         if query_terms.is_empty() {
@@ -227,15 +255,15 @@ impl RankingStrategy for TfIdfStrategy {
 
         let mut tfidf = 0.0;
         for term in &query_terms {
-            let term_lower = term.to_lowercase();
-            let tf = tokens.iter().filter(|t| *t == &term_lower).count() as f32 / doc_len;
+            let tf = tokens.iter().filter(|t| t == &term).count() as f32 / doc_len;
             let idf = 1.0 + (term.len() as f32).ln();
             tfidf += tf * idf;
         }
 
         let position_weight = 1.0 / (raw.position as f32 + 1.0).log2();
         let authority = domain_authority(&raw.url);
-        let score = tfidf * position_weight * engine_weight * authority * 100.0;
+        let freshness = freshness_weight(raw.published_date);
+        let score = tfidf * position_weight * engine_weight * authority * freshness * 100.0;
         normalize(score)
     }
 }
@@ -251,7 +279,8 @@ impl RankingStrategy for PositionOnlyStrategy {
     fn score(&self, raw: &RawSearchResult, _query: &SearchQuery, engine_weight: f32, _engines: &[String]) -> f32 {
         let pos_score = 1.0 / (raw.position as f32 + 1.0).log2();
         let authority = domain_authority(&raw.url);
-        let score = pos_score * engine_weight * authority;
+        let freshness = freshness_weight(raw.published_date);
+        let score = pos_score * engine_weight * authority * freshness;
         normalize(score)
     }
 }
@@ -280,25 +309,24 @@ impl RankingStrategy for Bm25TitleBoostStrategy {
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, engine_weight: f32, _engines: &[String]) -> f32 {
         let bm25 = bm25_score(raw, query);
 
-        let query_terms: Vec<&str> = {
+        let query_terms: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
-            query
-                .query
-                .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-                .filter(|t| !t.is_empty())
-                .filter(|t| seen.insert(t.to_lowercase()))
+            tokenize(&query.query)
+                .into_iter()
+                .filter(|t| seen.insert(t.clone()))
                 .collect()
         };
         let title_tokens = tokenize(&raw.title);
         let title_match = query_terms
             .iter()
-            .filter(|t| title_tokens.iter().any(|tok| tok == &t.to_lowercase()))
+            .filter(|t| title_tokens.iter().any(|tok| tok == *t))
             .count() as f32
-            / query_terms.len() as f32;
+            / query_terms.len().max(1) as f32;
 
         let position_weight = 1.0 / (raw.position as f32 + 1.0).log2();
         let authority = domain_authority(&raw.url);
-        let score = (bm25 + title_match * 2.0) * position_weight * engine_weight * authority;
+        let freshness = freshness_weight(raw.published_date);
+        let score = (bm25 + title_match * 2.0) * position_weight * engine_weight * authority * freshness;
         normalize(score)
     }
 }
@@ -319,7 +347,8 @@ impl RankingStrategy for SearxngOnlyStrategy {
         }
         let pos_score = 1.0 / (raw.position as f32 + 1.0).log2();
         let authority = domain_authority(&raw.url);
-        let score = pos_score * authority;
+        let freshness = freshness_weight(raw.published_date);
+        let score = pos_score * authority * freshness;
         normalize(score)
     }
 }
@@ -467,12 +496,7 @@ impl RankingStrategy for BgeRerankerStrategy {
 
 /// Fraction of unique query terms that appear in the document.
 fn query_coverage(document: &str, query: &SearchQuery) -> f32 {
-    let query_terms: std::collections::HashSet<String> = query
-        .query
-        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
-        .collect();
+    let query_terms: std::collections::HashSet<String> = tokenize(&query.query).into_iter().collect();
     if query_terms.is_empty() {
         return 1.0;
     }

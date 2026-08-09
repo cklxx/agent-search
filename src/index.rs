@@ -8,9 +8,11 @@ use std::path::Path;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::{QueryParser, TermQuery};
-use tantivy::schema::{Field, Schema, STORED, STRING, TEXT, Value};
+use tantivy::schema::{Field, Schema, STORED, STRING, TEXT, TextOptions, TextFieldIndexing, IndexRecordOption, Value};
+use tantivy::tokenizer::{NgramTokenizer, TextAnalyzer};
 use tantivy::{doc, Index, IndexWriter, Term, TantivyError};
 
+use crate::dedup::{DedupService, normalize_url};
 use crate::models::result::SearchResult;
 
 const DEFAULT_SEARCH_LIMIT: usize = 20;
@@ -46,6 +48,11 @@ impl LocalIndex {
     }
 
     fn from_parts(index: Index, fields: IndexFields) -> Self {
+        // Register the CJK n-gram tokenizer (2-gram) for title/snippet/content.
+        let ngram = NgramTokenizer::all_ngrams(2, 2).expect("2-gram tokenizer params are valid");
+        let tokenizer = TextAnalyzer::from(ngram);
+        index.tokenizers().register("cjk_ngram", tokenizer);
+
         Self {
             index,
             query_field: fields.query,
@@ -80,7 +87,12 @@ impl LocalIndex {
     }
 
     /// Index a crawled page (title + full content) for full-text search.
-    pub fn index_page(&self, url: &str, title: &str, content: &str) -> Result<(), TantivyError> {
+    /// Skips URLs already indexed (tracked by the shared DedupService).
+    pub fn index_page(&self, url: &str, title: &str, content: &str, dedup: &DedupService) -> Result<(), TantivyError> {
+        if !dedup.insert(url) {
+            return Ok(());
+        }
+
         let mut index_writer: IndexWriter = self.index.writer(50_000_000)?;
         index_writer.add_document(doc!(
             self.query_field => String::new(),
@@ -111,7 +123,7 @@ impl LocalIndex {
             return None;
         }
 
-        Some(self.collect_results(&searcher, top_docs))
+        Some(self.collect_results(&searcher, top_docs, true))
     }
 
     /// Full-text BM25 search over title + content fields.
@@ -133,17 +145,18 @@ impl LocalIndex {
             return None;
         }
 
-        Some(self.collect_results(&searcher, top_docs))
+        Some(self.collect_results(&searcher, top_docs, false))
     }
 
     fn collect_results(
         &self,
         searcher: &tantivy::Searcher,
         top_docs: Vec<(f32, tantivy::DocAddress)>,
+        use_stored_score: bool,
     ) -> Vec<SearchResult> {
         let mut seen = std::collections::HashSet::new();
         let mut results = Vec::with_capacity(top_docs.len());
-        for (score, doc_address) in top_docs {
+        for (bm25_score, doc_address) in top_docs {
             let retrieved_doc = match searcher.doc(doc_address) {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -153,10 +166,23 @@ impl LocalIndex {
             let snippet = field_str(&retrieved_doc, self.snippet_field);
             let engine = field_str(&retrieved_doc, self.engine_field);
 
-            // Dedup by URL: the same page may be indexed under multiple queries.
-            if !seen.insert(url.clone()) {
+            // Dedup by normalized URL: the same page may be indexed under
+            // multiple queries or with different URL encodings.
+            let normalized = normalize_url(&url);
+            if !seen.insert(normalized) {
                 continue;
             }
+
+            // For cached exact-query results, use the stored ranking score.
+            // For full-text results, use the BM25 score from Tantivy.
+            let score = if use_stored_score {
+                retrieved_doc
+                    .get_first(self.score_field)
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(bm25_score as f64) as f32
+            } else {
+                bm25_score
+            };
 
             results.push(SearchResult {
                 title,
@@ -183,12 +209,22 @@ struct IndexFields {
 
 fn build_schema() -> (Schema, IndexFields) {
     let mut schema_builder = Schema::builder();
+
     // STRING (not tokenized) so exact query matching works.
     let query = schema_builder.add_text_field("query", STRING | STORED);
-    let title = schema_builder.add_text_field("title", TEXT | STORED);
+
+    // Title and content use a 2-gram tokenizer for CJK support.
+    let cjk_indexing = TextFieldIndexing::default()
+        .set_tokenizer("cjk_ngram")
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+    let cjk_options = TextOptions::default()
+        .set_indexing_options(cjk_indexing)
+        .set_stored();
+
+    let title = schema_builder.add_text_field("title", cjk_options.clone());
     let url = schema_builder.add_text_field("url", TEXT | STORED);
-    let snippet = schema_builder.add_text_field("snippet", TEXT | STORED);
-    let content = schema_builder.add_text_field("content", TEXT | STORED);
+    let snippet = schema_builder.add_text_field("snippet", cjk_options.clone());
+    let content = schema_builder.add_text_field("content", cjk_options);
     let score = schema_builder.add_f64_field("score", STORED);
     let engine = schema_builder.add_text_field("engine", TEXT | STORED);
     let schema = schema_builder.build();

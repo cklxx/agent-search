@@ -28,6 +28,8 @@ fn test_state() -> AppState {
         upstream_api_key: None,
         http_client: reqwest::Client::new(),
         engine_semaphore: Arc::new(tokio::sync::Semaphore::new(agent_search::aggregator::MAX_CONCURRENT_ENGINES)),
+        domain_rate_limiter: Arc::new(agent_search::engine::DomainRateLimiter::default()),
+        dedup: Arc::new(agent_search::dedup::DedupService::new()),
     }
 }
 
