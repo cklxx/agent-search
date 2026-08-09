@@ -296,12 +296,13 @@ impl SearchEngine for ConfigurableEngine {
 }
 
 /// Get a value from a JSON object using a slash-separated path.
-/// Example: "data/items" -> data["items"]
+/// Thin wrapper around `serde_json::Value::pointer` (RFC 6901).
+/// Numeric segments index arrays; string segments index object keys.
+/// Example: "data/items/0/title" -> data["items"][0]["title"]
 fn get_json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    let mut current = value;
-    for part in parts {
-        current = current.get(part)?;
+    let path = path.trim_start_matches('/');
+    if path.is_empty() {
+        return Some(value);
     }
-    Some(current)
+    value.pointer(&format!("/{}", path))
 }

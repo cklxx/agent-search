@@ -528,7 +528,7 @@
   categories: [it, q&a]
   weight: 1.8
   search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=stackoverflow&pagesize=10"
-  json:
+  json: &se_json
     results: "items"
     url: "link"
     title: "title"
@@ -538,31 +538,19 @@
   type: json
   categories: [it, q&a]
   search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=superuser&pagesize=10"
-  json:
-    results: "items"
-    url: "link"
-    title: "title"
-    content: "body"
+  json: *se_json
 
 - name: askubuntu
   type: json
   categories: [it, q&a]
   search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=askubuntu&pagesize=10"
-  json:
-    results: "items"
-    url: "link"
-    title: "title"
-    content: "body"
+  json: *se_json
 
 - name: mathoverflow
   type: json
   categories: [science, math]
   search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=mathoverflow&pagesize=10"
-  json:
-    results: "items"
-    url: "link"
-    title: "title"
-    content: "body"
+  json: *se_json
 
 - name: quora
   type: html
@@ -960,3 +948,198 @@
     url: "url"
     title: "title"
     content: "content"
+
+# --- Additional academic / LLM / systems engines ---
+
+- name: openalex
+  type: json
+  categories: [science, scientific publications]
+  weight: 1.4
+  search_url: "https://api.openalex.org/works?search={query}&per-page=10"
+  json:
+    results: "results"
+    url: "doi"
+    title: "title"
+    content: "display_name"
+
+- name: crossref
+  type: json
+  categories: [science, scientific publications]
+  weight: 1.3
+  search_url: "https://api.crossref.org/works?query={query}&rows=10"
+  json:
+    results: "message/items"
+    url: "URL"
+    title: "title/0"
+    content: "container-title/0"
+
+- name: europe_pmc
+  type: json
+  categories: [science, medical, scientific publications]
+  weight: 1.4
+  search_url: "https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={query}&format=json&pageSize=10&resultType=core"
+  json:
+    results: "resultList/result"
+    url: "doi"
+    url_prefix: "https://doi.org/"
+    title: "title"
+    content: "abstractText"
+
+- name: doaj
+  type: json
+  categories: [science, scientific publications]
+  weight: 1.3
+  search_url: "https://doaj.org/api/search/articles/{query}?pageSize=10"
+  json:
+    results: "results"
+    url: "bibjson/link/0/url"
+    title: "bibjson/title"
+    content: "bibjson/abstract"
+
+- name: dblp
+  type: json
+  categories: [science, it, scientific publications]
+  weight: 1.5
+  search_url: "https://dblp.org/search/publ/api?q={query}&format=json&h=10"
+  json:
+    results: "result/hits/hit"
+    url: "info/url"
+    title: "info/title"
+    content: "info/venue"
+
+# --- Stack Exchange network sites ---
+
+- name: ai_stackexchange
+  type: json
+  categories: [science, it, q&a]
+  weight: 1.5
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=ai&pagesize=10"
+  json: *se_json
+
+- name: security_stackexchange
+  type: json
+  categories: [it, q&a]
+  weight: 1.4
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=security&pagesize=10"
+  json: *se_json
+
+- name: cs_stackexchange
+  type: json
+  categories: [science, it, q&a]
+  weight: 1.4
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=cs&pagesize=10"
+  json: *se_json
+
+- name: datascience_stackexchange
+  type: json
+  categories: [science, it, q&a]
+  weight: 1.4
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=datascience&pagesize=10"
+  json: *se_json
+
+- name: devops_stackexchange
+  type: json
+  categories: [it, q&a]
+  weight: 1.3
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=devops&pagesize=10"
+  json: *se_json
+
+- name: softwareengineering_stackexchange
+  type: json
+  categories: [it, q&a]
+  weight: 1.4
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=softwareengineering&pagesize=10"
+  json: *se_json
+
+- name: serverfault
+  type: json
+  categories: [it, q&a]
+  weight: 1.4
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=serverfault&pagesize=10"
+  json: *se_json
+
+- name: dba_stackexchange
+  type: json
+  categories: [it, q&a]
+  weight: 1.3
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=dba&pagesize=10"
+  json: *se_json
+
+- name: unix_stackexchange
+  type: json
+  categories: [it, q&a]
+  weight: 1.4
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=unix&pagesize=10"
+  json: *se_json
+
+- name: wordpress_stackexchange
+  type: json
+  categories: [it, q&a]
+  weight: 1.2
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=wordpress&pagesize=10"
+  json: *se_json
+
+- name: raspberrypi_stackexchange
+  type: json
+  categories: [it, q&a]
+  weight: 1.2
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=raspberrypi&pagesize=10"
+  json: *se_json
+
+- name: electronics_stackexchange
+  type: json
+  categories: [science, it, q&a]
+  weight: 1.2
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=electronics&pagesize=10"
+  json: *se_json
+
+- name: physics_stackexchange
+  type: json
+  categories: [science, q&a]
+  weight: 1.3
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=physics&pagesize=10"
+  json: *se_json
+
+- name: math_stackexchange
+  type: json
+  categories: [science, math, q&a]
+  weight: 1.3
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=math&pagesize=10"
+  json: *se_json
+
+# --- Programming & documentation ---
+
+- name: docs_rs
+  type: html
+  categories: [it, packages]
+  weight: 1.6
+  search_url: "https://docs.rs/releases/search?query={query}"
+  html:
+    results: "li"
+    url: "a.release"
+    title: ".name"
+    content: ".description"
+
+- name: github_issues
+  type: json
+  categories: [it, repos]
+  weight: 1.3
+  search_url: "https://api.github.com/search/issues?q={query}&per_page=10"
+  json:
+    results: "items"
+    url: "html_url"
+    title: "title"
+    content: "body"
+
+# --- News ---
+
+- name: techcrunch
+  type: html
+  categories: [news, it]
+  weight: 1.2
+  search_url: "https://techcrunch.com/search/{query}"
+  html:
+    results: ".loop-card"
+    url: ".loop-card__title-link"
+    title: ".loop-card__title-link"
+    content: ".loop-card__cat"

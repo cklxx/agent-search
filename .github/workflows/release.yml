@@ -5,37 +5,64 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-latest
+            target: macos-arm64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Build
         run: cargo build --release
 
       - name: Pre-download model
         run: |
-          ./target/release/agent-search &
+          ./target/release/agent-search > server.log 2>&1 &
           SERVER_PID=$!
-          sleep 30
-          # Trigger model download via a search request
-          curl -s -X POST http://127.0.0.1:18789/search \
-            -H "Content-Type: application/json" \
-            -d '{"query":"test","max_results":1}' || true
-          sleep 10
+          # The jina-reranker-v2 model downloads during startup (get_strategy
+          # calls BgeRerankerStrategy::new). Wait for the server to bind,
+          # which means the model finished loading.
+          for i in $(seq 1 300); do
+            if grep -q "listening on" server.log; then
+              echo "Server started — model loaded successfully"
+              break
+            fi
+            if grep -q "Failed to load jina-reranker-v2" server.log; then
+              echo "Model download failed"
+              cat server.log
+              kill $SERVER_PID 2>/dev/null || true
+              exit 1
+            fi
+            sleep 1
+          done
           kill $SERVER_PID 2>/dev/null || true
+          wait $SERVER_PID 2>/dev/null || true
+          # Verify the model cache was populated.
+          test -d models/models--jinaai--jina-reranker-v2-base-multilingual/snapshots \
+            || { echo "model cache missing"; exit 1; }
 
       - name: Package
         run: |
+          rm -rf dist
           mkdir -p dist
           cp target/release/agent-search dist/
           cp config.toml dist/
           cp engines.yaml dist/
-          # Bundle the downloaded model
           cp -r models dist/models
           cat > dist/start.sh << 'EOF'
           #!/bin/bash
@@ -43,9 +70,33 @@ jobs:
           ./agent-search
           EOF
           chmod +x dist/start.sh
-          tar -czf agent-search-macos-arm64.tar.gz -C dist .
+          tar -czf agent-search-${{ matrix.target }}.tar.gz -C dist .
 
-      - name: Release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-search-${{ matrix.target }}
+          path: agent-search-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -name 'agent-search-*.tar.gz' -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: agent-search-macos-arm64.tar.gz
+          files: release/agent-search-*.tar.gz
+          generate_release_notes: true
