@@ -106,7 +106,9 @@ pub async fn fetch_raw_results(
     let mut errors: Vec<EngineErrorInfo> = Vec::new();
 
     // Minimum results before we stop waiting for slow engines.
-    const MIN_RESULTS: usize = 10;
+    // 5 is enough for the reranker to produce a top-10 list; waiting for
+    // more increases tail latency without much quality gain.
+    const MIN_RESULTS: usize = 5;
 
     let deadline = tokio::time::Instant::now() + deadline;
     loop {

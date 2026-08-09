@@ -431,17 +431,24 @@ impl RankingStrategy for BgeRerankerStrategy {
                     let (raw, _, _) = &items[orig_idx];
                     let coverage = query_coverage(&documents[rank], query);
                     let authority = domain_authority(&raw.url);
-                    let raw_score = authority * authority * r.score * coverage;
+                    // Cross-encoder returns raw logits (can be negative).
+                    // Sigmoid maps to (0, 1) so the mix formula stays in [0, 1].
+                    let relevance = 1.0 / (1.0 + (-r.score).exp());
+                    let raw_score = authority * authority * relevance * coverage;
                     scores[orig_idx] = raw_score.clamp(0.0, 1.0);
                 }
             }
+        }
 
-            if should_rebuild {
-                if let Ok(new_reranker) = Self::build_reranker() {
+        // Rebuild outside the lock: model loading takes hundreds of ms, and
+        // we don't want to block other requests round-robined onto this slot.
+        if should_rebuild {
+            if let Ok(new_reranker) = Self::build_reranker() {
+                if let Ok(mut reranker) = self.pool[idx].lock() {
                     *reranker = new_reranker;
-                } else {
-                    tracing::error!("reranker rebuild failed");
                 }
+            } else {
+                tracing::error!("reranker rebuild failed");
             }
         }
 
