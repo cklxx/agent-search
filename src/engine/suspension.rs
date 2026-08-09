@@ -53,23 +53,34 @@ impl EngineSuspensionManager {
     }
 
     pub fn is_suspended(&self, engine_name: &str) -> bool {
-        self.statuses
-            .lock()
-            .unwrap()
-            .get(engine_name)
-            .map(|s| s.is_suspended())
-            .unwrap_or(false)
+        let mut statuses = match self.statuses.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        if let Some(status) = statuses.get_mut(engine_name) {
+            // If suspension expired, reset the error counter so backoff
+            // reflects recent failures, not lifetime error count.
+            if !status.is_suspended() {
+                status.continuous_errors = 0;
+                status.suspend_end_time = None;
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
     }
 
     pub fn record_success(&self, engine_name: &str) {
-        if let Some(status) = self.statuses.lock().unwrap().get_mut(engine_name) {
+        if let Some(status) = self.statuses.lock().unwrap_or_else(|e| e.into_inner()).get_mut(engine_name) {
             status.resume();
         }
     }
 
     /// Returns suspension duration if the engine was suspended.
     pub fn record_error(&self, engine_name: &str, error: &SearchError) -> Option<Duration> {
-        let mut statuses = self.statuses.lock().unwrap();
+        let mut statuses = self.statuses.lock().unwrap_or_else(|e| e.into_inner());
         let status = statuses.entry(engine_name.to_string()).or_default();
 
         let duration = suspension_duration(error, status.continuous_errors, self.ban_time_on_fail, self.max_ban_time_on_fail);
@@ -84,7 +95,7 @@ impl EngineSuspensionManager {
     }
 }
 
-/// 403/429: 180s, others: exponential backoff.
+/// 403/429: 180s, others (including timeout): exponential backoff.
 fn suspension_duration(
     error: &SearchError,
     continuous_errors: u32,
@@ -97,10 +108,12 @@ fn suspension_duration(
     };
 
     match error {
-        SearchError::Timeout => None,
         SearchError::HttpStatus(403) | SearchError::HttpStatus(429) => {
             Some(Duration::from_secs(180))
         }
+        // Timeout uses exponential backoff so a persistently slow engine
+        // doesn't add its full timeout to every request's tail latency.
+        SearchError::Timeout => Some(exponential()),
         _ => Some(exponential()),
     }
 }
@@ -124,14 +137,14 @@ mod tests {
     }
 
     #[test]
-    fn test_timeout_no_suspension() {
+    fn test_timeout_uses_exponential_backoff() {
         let duration = suspension_duration(
             &SearchError::Timeout,
             5,
             Duration::from_secs(5),
             Duration::from_secs(120),
         );
-        assert!(duration.is_none());
+        assert!(duration.is_some());
     }
 
     #[test]

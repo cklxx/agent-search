@@ -11,32 +11,47 @@ use crate::proxy::ProxyManager;
 
 /// Returns `(pool_clients, default_client, proxy_manager)`.
 /// `pool_clients` is aligned with `ProxyManager::urls`; empty if no proxies.
+/// Proxies that fail to build a client are skipped (logged as warnings).
 pub(crate) fn build_pool_clients(
     user_agent: &str,
     headers: &HeaderMap,
     proxy_manager: Option<Arc<ProxyManager>>,
 ) -> (Vec<Client>, Client, Option<Arc<ProxyManager>>) {
-    let build = |proxy: Option<&str>| -> Client {
+    let build = |proxy: Option<&str>| -> Option<Client> {
         let mut builder = Client::builder()
             .user_agent(user_agent)
             .default_headers(headers.clone());
         if let Some(url) = proxy {
-            if let Ok(p) = reqwest::Proxy::all(url) {
-                builder = builder.proxy(p);
+            match reqwest::Proxy::all(url) {
+                Ok(p) => builder = builder.proxy(p),
+                Err(e) => {
+                    tracing::warn!("invalid proxy URL {}: {}", url, e);
+                    return None;
+                }
             }
         }
-        builder.build().expect("failed to build HTTP client")
+        match builder.build() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("failed to build HTTP client: {}", e);
+                None
+            }
+        }
     };
 
     if let Some(pm) = proxy_manager {
         if !pm.is_empty() {
-            let pool = pm.urls().iter().map(|u| build(Some(u))).collect();
-            let default = build(None);
+            let pool: Vec<Client> = pm
+                .urls()
+                .iter()
+                .filter_map(|u| build(Some(u)))
+                .collect();
+            let default = build(None).expect("default client build must succeed");
             return (pool, default, Some(pm));
         }
     }
 
-    let default = build(None);
+    let default = build(None).expect("default client build must succeed");
     (Vec::new(), default, None)
 }
 

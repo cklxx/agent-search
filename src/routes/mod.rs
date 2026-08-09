@@ -52,7 +52,7 @@ pub async fn search(
         tracing::warn!("upstream search returned no results, falling back to local aggregator");
     }
 
-    let key = cache_key(&query.query, query.page, query.max_results);
+    let key = cache_key(&query);
 
     if let Some(cached) = state.cache.get(&key).await {
         return (StatusCode::OK, Json((*cached).clone())).into_response();
@@ -145,8 +145,22 @@ pub async fn search_ab(
     };
 
     // Fetch raw results once, score twice with each strategy.
-    let (dedup_map, errors) =
-        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension).await;
+    let fetch_result = tokio::time::timeout(
+        state.request_timeout,
+        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension),
+    )
+    .await;
+
+    let (dedup_map, errors) = match fetch_result {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(serde_json::json!({"error": "search timed out"})),
+            )
+                .into_response();
+        }
+    };
 
     let results_a = aggregator::score_results(dedup_map.clone(), &query, strategy_a.as_ref());
     let results_b = aggregator::score_results(dedup_map, &query, strategy_b.as_ref());
@@ -197,16 +211,28 @@ pub async fn search_stream(
     let suspension = state.suspension.clone();
     let strategy = state.strategy.clone();
 
+    let request_timeout = state.request_timeout;
     tokio::spawn(async move {
-        let response = aggregator::aggregate(&query, &registry, &suspension, strategy.as_ref()).await;
+        let response = tokio::time::timeout(
+            request_timeout,
+            aggregator::aggregate(&query, &registry, &suspension, strategy.as_ref()),
+        )
+        .await;
         match response {
-            Ok(resp) => {
+            Ok(Ok(resp)) => {
                 for result in resp.results {
                     let _ = tx.send(serde_json::to_string(&result).unwrap_or_default()).await;
                 }
             }
-            Err(e) => {
-                let _ = tx.send(format!(r#"{{"error":"{}"}}"#, e)).await;
+            Ok(Err(e)) => {
+                let _ = tx
+                    .send(serde_json::json!({"error": e.to_string()}).to_string())
+                    .await;
+            }
+            Err(_) => {
+                let _ = tx
+                    .send(serde_json::json!({"error": "search timed out"}).to_string())
+                    .await;
             }
         }
     });
@@ -253,7 +279,8 @@ pub async fn fetch_content(
 }
 
 /// Call the upstream LLM relay's web_search tool and return parsed results.
-/// Retries up to 3 times if the model reports no web search access.
+/// Returns an empty vec if the upstream fails or returns no results; the
+/// caller is responsible for falling back to the local aggregator.
 pub async fn search_upstream(
     upstream: &str,
     api_key: Option<&str>,

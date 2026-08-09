@@ -33,6 +33,26 @@ pub fn normalize_url(raw: &str) -> String {
         }
     }
 
+    // Unwrap other web archive services to their original URLs.
+    // archive.today / archive.ph: https://archive.today/20220101000000/https://example.com
+    for prefix in &[
+        "https://archive.today/",
+        "https://archive.ph/",
+        "https://archive.fo/",
+        "https://archive.li/",
+        "https://archive.md/",
+        "https://archive.vn/",
+    ] {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            if let Some(idx) = rest.find('/') {
+                let after_ts = &rest[idx + 1..];
+                if after_ts.starts_with("http://") || after_ts.starts_with("https://") {
+                    return normalize_url(after_ts);
+                }
+            }
+        }
+    }
+
     let parsed = match Url::parse(raw) {
         Ok(u) => u,
         Err(_) => return raw.to_string(),

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use moka::future::Cache;
 
+use crate::models::query::SearchQuery;
 use crate::models::result::SearchResponse;
 
 #[derive(Clone)]
@@ -30,6 +31,16 @@ impl QueryCache {
     }
 }
 
-pub fn cache_key(query: &str, page: u32, max_results: usize) -> String {
-    format!("{}:{}:{}", query, page, max_results)
+/// Build a cache key from all query fields that affect results.
+pub fn cache_key(query: &SearchQuery) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        query.query,
+        query.page,
+        query.max_results,
+        query.language.as_deref().unwrap_or(""),
+        query.time_range.as_deref().unwrap_or(""),
+        query.safe_search,
+        query.category.as_deref().unwrap_or(""),
+    )
 }

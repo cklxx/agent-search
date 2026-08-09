@@ -130,7 +130,7 @@ async fn warmup(state: &AppState, queries: &[String]) {
         {
             Ok(response) => {
                 let _ = state.local_index.cache_results(q, &response.results);
-                let key = agent_search::cache::cache_key(q, 0, 10);
+                let key = agent_search::cache::cache_key(&query);
                 state.cache.insert(key, Arc::new(response)).await;
                 tracing::info!("warmed up query: {}", q);
             }

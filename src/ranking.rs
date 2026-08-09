@@ -26,32 +26,72 @@ fn domain_authority(url: &str) -> f32 {
         ("scholar.google.com", 1.5),
         ("semanticscholar.org", 1.5),
         ("pubmed.ncbi.nlm.nih.gov", 1.4),
+        ("nature.com", 1.4),
+        ("science.org", 1.4),
         // Programming / systems
         ("stackoverflow.com", 1.5),
+        ("serverfault.com", 1.4),
+        ("superuser.com", 1.4),
         ("github.com", 1.4),
+        ("gitlab.com", 1.3),
         ("developer.mozilla.org", 1.4),
         ("docs.rs", 1.4),
         ("doc.rust-lang.org", 1.4),
+        ("rust-lang.org", 1.4),
         ("python.org", 1.3),
         ("go.dev", 1.3),
+        ("golang.org", 1.3),
         ("kubernetes.io", 1.4),
         ("docker.com", 1.3),
         ("nginx.org", 1.3),
+        ("man7.org", 1.4),
+        ("kernel.org", 1.4),
+        ("llvm.org", 1.4),
+        ("redis.io", 1.3),
+        ("postgresql.org", 1.3),
+        ("mysql.com", 1.3),
+        ("learn.microsoft.com", 1.3),
         // General knowledge
         ("wikipedia.org", 1.3),
         // LLM / AI
         ("huggingface.co", 1.4),
         ("openai.com", 1.3),
+        ("anthropic.com", 1.3),
         // Low-quality mirrors / snapshots — downrank
         ("archive.org", 0.5),
         ("web.archive.org", 0.5),
     ];
 
-    AUTHORITIES
+    // Known content-farm / spam domains — hard downrank.
+    static SPAM_DOMAINS: &[&str] = &[
+        "medium.com",   // user-generated, often republished
+        "dev.to",       // user-generated
+        "hackernoon.com",
+        "towardsdatascience.com",
+        "javascript.plainenglish.io",
+        "levelup.gitconnected.com",
+    ];
+
+    let authority = AUTHORITIES
         .iter()
         .filter(|(d, _)| domain == **d || domain.ends_with(&format!(".{}", d)))
         .map(|(_, v)| *v)
-        .fold(1.0_f32, f32::max)
+        .fold(1.0_f32, f32::max);
+
+    // If not in the authority table, check spam/TLD heuristics.
+    if authority == 1.0 {
+        // Spam domain blacklist.
+        if SPAM_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d))) {
+            return 0.5;
+        }
+        // Spam-heavy TLDs get a penalty unless whitelisted above.
+        let tld = domain.rsplit('.').next().unwrap_or("");
+        if matches!(tld, "xyz" | "top" | "click" | "info" | "site" | "online" | "icu") {
+            return 0.5;
+        }
+    }
+
+    authority
 }
 
 pub trait RankingStrategy: Send + Sync {
@@ -310,23 +350,11 @@ impl RankingStrategy for BgeRerankerStrategy {
         "bge_reranker"
     }
 
-    fn score(&self, raw: &RawSearchResult, query: &SearchQuery, _engine_weight: f32, _engines: &[String]) -> f32 {
-        let document = format!("{} {} {}", raw.title, raw.url, raw.snippet);
-        let document: String = document.chars().take(512).collect();
-        let mut reranker = match self.reranker.lock() {
-            Ok(r) => r,
-            Err(_) => return 0.0,
-        };
-        let relevance = match reranker.rerank(query.query.as_str(), vec![document.as_str()], false, None) {
-            Ok(results) => results.first().map(|r| r.score).unwrap_or(0.0),
-            Err(_) => 0.0,
-        };
-
-        let coverage = query_coverage(&document, query);
-        let authority = domain_authority(&raw.url);
-        // Mix ranking: authority has highest weight (squared), then relevance,
-        // then query coverage to anchor semantic relevance to query terms.
-        authority * authority * relevance * coverage
+    fn score(&self, raw: &RawSearchResult, query: &SearchQuery, engine_weight: f32, engines: &[String]) -> f32 {
+        // Delegate to score_batch so both paths share the same memory
+        // reclaim (reranker rebuild) logic.
+        let items = [(raw.clone(), engines.to_vec(), engine_weight)];
+        self.score_batch(&items, query).pop().unwrap_or(0.0)
     }
 
     fn score_batch(
@@ -343,7 +371,8 @@ impl RankingStrategy for BgeRerankerStrategy {
         // result from every engine.
         const TOP_N: usize = 30;
         // Rebuild the reranker every N calls to reclaim onnx runtime memory.
-        const REBUILD_EVERY: u64 = 1;
+        // N=50 bounds memory growth while keeping per-request latency low.
+        const REBUILD_EVERY: u64 = 50;
 
         let bm25_scores: Vec<f32> = items
             .iter()
@@ -389,7 +418,9 @@ impl RankingStrategy for BgeRerankerStrategy {
                     let coverage = query_coverage(&documents[rank], query);
                     let authority = domain_authority(&raw.url);
                     // Mix ranking: authority² × relevance × coverage.
-                    scores[orig_idx] = authority * authority * r.score * coverage;
+                    let raw_score = authority * authority * r.score * coverage;
+                    // Clamp to [0, 1] per the RankingStrategy contract.
+                    scores[orig_idx] = raw_score.clamp(0.0, 1.0);
                 }
             }
 
@@ -398,6 +429,8 @@ impl RankingStrategy for BgeRerankerStrategy {
                 // onnx runtime memory that accumulates across calls.
                 if let Ok(new_reranker) = Self::build_reranker() {
                     *reranker = new_reranker;
+                } else {
+                    tracing::error!("reranker rebuild failed");
                 }
             }
         }

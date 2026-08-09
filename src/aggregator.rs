@@ -20,6 +20,12 @@ pub async fn aggregate(
     strategy: &dyn RankingStrategy,
 ) -> EngineResult<SearchResponse> {
     let (dedup_map, errors) = fetch_raw_results(query, registry, suspension).await;
+
+    // If every engine failed, return an error so the caller can return 5xx.
+    if dedup_map.is_empty() && !errors.is_empty() {
+        return Err(SearchError::Request("all engines failed".to_string()));
+    }
+
     let results = score_results(dedup_map, query, strategy);
 
     Ok(SearchResponse {
@@ -100,6 +106,7 @@ pub async fn fetch_raw_results(
                 } else {
                     e.to_string()
                 };
+                tracing::warn!(engine = %engine_name, error = %e, "engine error");
                 errors.push(EngineErrorInfo {
                     engine: engine_name,
                     error: error_msg,
