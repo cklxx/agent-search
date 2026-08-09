@@ -11,7 +11,6 @@ use axum::Json;
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 
-use crate::aggregator;
 use crate::models::query::SearchQuery;
 use crate::routes::AppState;
 
@@ -147,42 +146,7 @@ async fn handle_tools_call(state: &AppState, params: &Value) -> Value {
         ..Default::default()
     };
 
-    // Try upstream search first if configured. Fall back to local
-    // aggregator when the upstream returns no results.
-    let mut results: Vec<crate::models::result::SearchResult> = Vec::new();
-    if let Some(ref upstream) = state.upstream_search_url {
-        results = crate::routes::search_upstream(
-            upstream,
-            state.upstream_api_key.as_deref(),
-            &query.query,
-        )
-        .await;
-        if results.is_empty() {
-            tracing::warn!("upstream search returned no results, falling back to local aggregator");
-        }
-    }
-
-    if results.is_empty() {
-        match aggregator::aggregate(
-            &query,
-            &state.registry,
-            &state.suspension,
-            state.strategy.clone(),
-        )
-        .await
-        {
-            Ok(response) => results = response.results,
-            Err(e) => {
-                return json!({
-                    "result": {
-                        "resultType": "complete",
-                        "isError": true,
-                        "content": [{ "type": "text", "text": format!("search failed: {}", e) }]
-                    }
-                });
-            }
-        }
-    }
+    let results = crate::routes::search_with_fallback(state, &query).await;
 
     let results_json: Vec<Value> = results
         .iter()

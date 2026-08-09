@@ -29,6 +29,39 @@ pub struct AppState {
     pub upstream_search_url: Option<String>,
     /// API key for the upstream search API.
     pub upstream_api_key: Option<String>,
+    /// Shared HTTP client for upstream search (avoids per-call connection setup).
+    pub http_client: reqwest::Client,
+}
+
+/// Try upstream search first; fall back to the local aggregator on empty
+/// results. Shared by `/search`, `/web_search`, and the MCP `web_search` tool.
+pub async fn search_with_fallback(
+    state: &AppState,
+    query: &SearchQuery,
+) -> Vec<crate::models::result::SearchResult> {
+    if let Some(ref upstream) = state.upstream_search_url {
+        let upstream_results = tokio::time::timeout(
+            state.request_timeout,
+            search_upstream(&state.http_client, upstream, state.upstream_api_key.as_deref(), &query.query),
+        )
+        .await
+        .unwrap_or_default();
+
+        if !upstream_results.is_empty() {
+            return upstream_results;
+        }
+        tracing::warn!("upstream search returned no results, falling back to local aggregator");
+    }
+
+    match tokio::time::timeout(
+        state.request_timeout,
+        aggregator::aggregate(query, &state.registry, &state.suspension, state.strategy.clone()),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response.results,
+        _ => Vec::new(),
+    }
 }
 
 /// POST /search
@@ -36,22 +69,6 @@ pub async fn search(
     State(state): State<AppState>,
     Json(query): Json<SearchQuery>,
 ) -> impl IntoResponse {
-    // Try upstream search API first if configured. Fall back to local
-    // aggregator when the upstream returns no results (e.g. the relay's
-    // web_search tool is intermittently unavailable).
-    if let Some(ref upstream) = state.upstream_search_url {
-        let results = search_upstream(upstream, state.upstream_api_key.as_deref(), &query.query).await;
-        if !results.is_empty() {
-            let response = crate::models::result::SearchResponse {
-                query: query.query.clone(),
-                results,
-                errors: Vec::new(),
-            };
-            return (StatusCode::OK, Json(response)).into_response();
-        }
-        tracing::warn!("upstream search returned no results, falling back to local aggregator");
-    }
-
     let key = cache_key(&query);
 
     if let Some(cached) = state.cache.get(&key).await {
@@ -69,30 +86,16 @@ pub async fn search(
         return (StatusCode::OK, Json((*response).clone())).into_response();
     }
 
-    let result = tokio::time::timeout(
-        state.request_timeout,
-        aggregator::aggregate(&query, &state.registry, &state.suspension, state.strategy.clone()),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(response)) => {
-            let _ = state.local_index.cache_results(&query.query, &response.results);
-            let response = Arc::new(response);
-            state.cache.insert(key, response.clone()).await;
-            (StatusCode::OK, Json((*response).clone())).into_response()
-        }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(serde_json::json!({"error": "search timed out"})),
-        )
-            .into_response(),
-    }
+    let results = search_with_fallback(&state, &query).await;
+    let response = crate::models::result::SearchResponse {
+        query: query.query.clone(),
+        results,
+        errors: Vec::new(),
+    };
+    let _ = state.local_index.cache_results(&query.query, &response.results);
+    let response = Arc::new(response);
+    state.cache.insert(key, response.clone()).await;
+    (StatusCode::OK, Json((*response).clone())).into_response()
 }
 
 /// POST /search/ab — run two strategies side-by-side.
@@ -147,7 +150,7 @@ pub async fn search_ab(
     // Fetch raw results once, score twice with each strategy.
     let fetch_result = tokio::time::timeout(
         state.request_timeout,
-        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, std::time::Duration::from_secs(3)),
+        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, aggregator::ENGINE_FANOUT_DEADLINE),
     )
     .await;
 
@@ -269,7 +272,7 @@ pub async fn web_search(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let query = match body.get("query").and_then(|v| v.as_str()) {
+    let query_str = match body.get("query").and_then(|v| v.as_str()) {
         Some(q) => q.to_string(),
         None => {
             return (
@@ -280,36 +283,16 @@ pub async fn web_search(
         }
     };
 
-    // Upstream first, fall back to local aggregator.
-    let mut results: Vec<crate::models::result::SearchResult> = Vec::new();
-    if let Some(ref upstream) = state.upstream_search_url {
-        results = search_upstream(upstream, state.upstream_api_key.as_deref(), &query).await;
-        if results.is_empty() {
-            tracing::warn!("upstream search returned no results, falling back to local aggregator");
-        }
-    }
-
-    if results.is_empty() {
-        let search_query = SearchQuery {
-            query: query.clone(),
-            ..Default::default()
-        };
-        if let Ok(response) = aggregator::aggregate(
-            &search_query,
-            &state.registry,
-            &state.suspension,
-            state.strategy.clone(),
-        )
-        .await
-        {
-            results = response.results;
-        }
-    }
+    let query = SearchQuery {
+        query: query_str.clone(),
+        ..Default::default()
+    };
+    let results = search_with_fallback(&state, &query).await;
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "query": query,
+            "query": query_str,
             "results": results,
         })),
     )
@@ -354,6 +337,7 @@ pub async fn fetch_content(
 /// Returns an empty vec if the upstream fails or returns no results; the
 /// caller is responsible for falling back to the local aggregator.
 pub async fn search_upstream(
+    client: &reqwest::Client,
     upstream: &str,
     api_key: Option<&str>,
     query: &str,
@@ -373,8 +357,6 @@ pub async fn search_upstream(
         "tools": [{"type": "web_search", "search_context_size": "high"}],
         "max_tokens": 4096,
     });
-
-    let client = reqwest::Client::new();
 
     let mut req = client.post(&url).json(&body);
     if let Some(key) = api_key {

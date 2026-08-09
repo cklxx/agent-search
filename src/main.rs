@@ -64,6 +64,11 @@ async fn async_main() -> anyhow::Result<()> {
 
     let request_timeout = Duration::from_secs(config.request_timeout_secs);
 
+    let http_client = reqwest::Client::builder()
+        .timeout(request_timeout)
+        .build()
+        .unwrap_or_default();
+
     let state = AppState {
         registry: Arc::new(registry),
         cache,
@@ -73,6 +78,7 @@ async fn async_main() -> anyhow::Result<()> {
         request_timeout,
         upstream_search_url: config.upstream_search_url.clone(),
         upstream_api_key: config.upstream_api_key.clone(),
+        http_client,
     };
 
     // Warmup: preheat the ranking model and populate caches for common queries.

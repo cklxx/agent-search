@@ -4,20 +4,8 @@ use url::Url;
 
 /// Lowercases host, strips tracking params (utm_*, fbclid, ...),
 /// removes trailing slash and fragment.
-/// Also unwraps web.archive.org snapshots to their original URLs.
+/// Also unwraps web.archive.org and archive.today snapshots to their original URLs.
 pub fn normalize_url(raw: &str) -> String {
-    // Unwrap Wayback Machine snapshots:
-    // https://web.archive.org/web/20220312110024/https://github.com/...
-    // -> https://github.com/...
-    if let Some(rest) = raw.strip_prefix("https://web.archive.org/web/") {
-        if let Some(idx) = rest.find('/') {
-            let after_ts = &rest[idx + 1..];
-            if after_ts.starts_with("http://") || after_ts.starts_with("https://") {
-                return normalize_url(after_ts);
-            }
-        }
-    }
-
     // Unwrap archive.org github repo snapshots:
     // https://archive.org/details/github.com-user-repo_-_2022-03-12_11-00-24
     // -> https://github.com/user/repo
@@ -33,9 +21,10 @@ pub fn normalize_url(raw: &str) -> String {
         }
     }
 
-    // Unwrap other web archive services to their original URLs.
-    // archive.today / archive.ph: https://archive.today/20220101000000/https://example.com
+    // Unwrap web archive snapshots to their original URLs.
+    // web.archive.org/web/<timestamp>/<url> and archive.today/ph/fo/li/md/vn/<timestamp>/<url>
     for prefix in &[
+        "https://web.archive.org/web/",
         "https://archive.today/",
         "https://archive.ph/",
         "https://archive.fo/",

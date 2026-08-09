@@ -75,14 +75,14 @@ fn domain_authority(url: &str) -> f32 {
 
     let authority = AUTHORITIES
         .iter()
-        .filter(|(d, _)| domain == **d || domain.ends_with(&format!(".{}", d)))
+        .filter(|(d, _)| domain_matches(&domain, d))
         .map(|(_, v)| *v)
         .fold(1.0_f32, f32::max);
 
     // If not in the authority table, check spam/TLD heuristics.
     if authority == 1.0 {
         // Spam domain blacklist.
-        if SPAM_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d))) {
+        if SPAM_DOMAINS.iter().any(|d| domain_matches(&domain, d)) {
             return 0.5;
         }
         // Spam-heavy TLDs get a penalty unless whitelisted above.
@@ -93,6 +93,11 @@ fn domain_authority(url: &str) -> f32 {
     }
 
     authority
+}
+
+/// True if `domain` equals `candidate` or is a subdomain of it.
+fn domain_matches(domain: &str, candidate: &str) -> bool {
+    domain == candidate || domain.strip_suffix(candidate).is_some_and(|s| s.ends_with('.'))
 }
 
 pub trait RankingStrategy: Send + Sync {
@@ -331,16 +336,18 @@ pub struct BgeRerankerStrategy {
 
 impl BgeRerankerStrategy {
     pub fn new() -> anyhow::Result<Self> {
-        // Pool size = min(CPU cores, 8). Each instance loads the full model
-        // (~300MB), so cap to avoid excessive memory.
-        let pool_size = std::thread::available_parallelism()
+        // Pool size and intra_threads are tuned so total onnx threads ≈ CPU
+        // cores: pool_size * intra_threads ≈ cores. Each instance uses 2
+        // threads for intra-op parallelism; pool size is half the core count.
+        let cores = std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(4)
-            .min(8);
+            .unwrap_or(4);
+        let intra_threads = 2;
+        let pool_size = (cores / intra_threads).clamp(1, 8);
         let mut pool = Vec::with_capacity(pool_size);
         let mut call_counts = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            pool.push(Mutex::new(Self::build_reranker()?));
+            pool.push(Mutex::new(Self::build_reranker(intra_threads)?));
             call_counts.push(AtomicU64::new(0));
         }
         Ok(Self {
@@ -350,16 +357,13 @@ impl BgeRerankerStrategy {
         })
     }
 
-    fn build_reranker() -> anyhow::Result<TextRerank> {
+    fn build_reranker(intra_threads: usize) -> anyhow::Result<TextRerank> {
         let mut options = RerankInitOptions::default();
         options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
         options.cache_dir = std::path::PathBuf::from("models");
-        // One thread per instance: with N pool instances we get N-way
-        // parallelism without oversubscribing the CPU.
-        options.intra_threads = Some(1);
-        // Cap sequence length to keep rerank latency and memory bounded.
-        // 1024 chars ≈ 256–512 tokens; 512 tokens gives the cross-encoder
-        // enough context for technical content without blowing up memory.
+        options.intra_threads = Some(intra_threads);
+        // 512 tokens gives the cross-encoder enough context for technical
+        // content without excessive compute.
         options.max_length = 512;
         TextRerank::try_new(options)
     }
@@ -405,8 +409,11 @@ impl RankingStrategy for BgeRerankerStrategy {
             .iter()
             .map(|&i| {
                 let (raw, _, _) = &items[i];
-                let doc = format!("{} {} {}", raw.title, raw.url, raw.snippet);
-                doc.chars().take(1024).collect()
+                let mut doc = format!("{} {} {}", raw.title, raw.url, raw.snippet);
+                if let Some((idx, _)) = doc.char_indices().nth(1024) {
+                    doc.truncate(idx);
+                }
+                doc
             })
             .collect();
 
@@ -443,7 +450,9 @@ impl RankingStrategy for BgeRerankerStrategy {
         // Rebuild outside the lock: model loading takes hundreds of ms, and
         // we don't want to block other requests round-robined onto this slot.
         if should_rebuild {
-            if let Ok(new_reranker) = Self::build_reranker() {
+            // intra_threads must match the original build; use 2 to keep
+            // in sync with BgeRerankerStrategy::new.
+            if let Ok(new_reranker) = Self::build_reranker(2) {
                 if let Ok(mut reranker) = self.pool[idx].lock() {
                     *reranker = new_reranker;
                 }

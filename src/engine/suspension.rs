@@ -52,36 +52,34 @@ impl EngineSuspensionManager {
         }
     }
 
+    fn statuses(&self) -> std::sync::MutexGuard<'_, HashMap<String, SuspendedStatus>> {
+        self.statuses.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn is_suspended(&self, engine_name: &str) -> bool {
-        let mut statuses = match self.statuses.lock() {
-            Ok(s) => s,
-            Err(e) => e.into_inner(),
-        };
-        if let Some(status) = statuses.get_mut(engine_name) {
-            // If suspension expired, reset the error counter so backoff
-            // reflects recent failures, not lifetime error count.
-            if !status.is_suspended() {
-                status.continuous_errors = 0;
-                status.suspend_end_time = None;
-                false
-            } else {
-                true
-            }
-        } else {
-            false
-        }
+        self.statuses()
+            .get(engine_name)
+            .map(|s| s.is_suspended())
+            .unwrap_or(false)
     }
 
     pub fn record_success(&self, engine_name: &str) {
-        if let Some(status) = self.statuses.lock().unwrap_or_else(|e| e.into_inner()).get_mut(engine_name) {
+        if let Some(status) = self.statuses().get_mut(engine_name) {
             status.resume();
         }
     }
 
     /// Returns suspension duration if the engine was suspended.
     pub fn record_error(&self, engine_name: &str, error: &SearchError) -> Option<Duration> {
-        let mut statuses = self.statuses.lock().unwrap_or_else(|e| e.into_inner());
+        let mut statuses = self.statuses();
         let status = statuses.entry(engine_name.to_string()).or_default();
+
+        // If a previous suspension has expired, reset the counter so backoff
+        // reflects recent failures, not the lifetime error count.
+        if !status.is_suspended() {
+            status.continuous_errors = 0;
+            status.suspend_end_time = None;
+        }
 
         let duration = suspension_duration(error, status.continuous_errors, self.ban_time_on_fail, self.max_ban_time_on_fail);
 

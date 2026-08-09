@@ -13,6 +13,10 @@ use crate::models::query::{SearchQuery, infer_categories};
 use crate::models::result::{EngineErrorInfo, RawSearchResult, SearchResponse, SearchResult};
 use crate::ranking::RankingStrategy;
 
+/// Global engine fan-out deadline. Caps worst-case latency; fast engines
+/// usually return within a few hundred ms, slow ones are cut off here.
+pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_millis(1500);
+
 /// Fan out to non-suspended engines, dedup by URL, score with `strategy`, sort.
 pub async fn aggregate(
     query: &SearchQuery,
@@ -20,11 +24,7 @@ pub async fn aggregate(
     suspension: &EngineSuspensionManager,
     strategy: Arc<dyn RankingStrategy>,
 ) -> EngineResult<SearchResponse> {
-    // Global engine fan-out deadline. Matches the high-weight engine timeout.
-    // In practice, fast engines return within a few hundred ms and we return
-    // early once we have enough results.
-    let engine_deadline = Duration::from_secs(3);
-    let (dedup_map, errors) = fetch_raw_results(query, registry, suspension, engine_deadline).await;
+    let (dedup_map, errors) = fetch_raw_results(query, registry, suspension, ENGINE_FANOUT_DEADLINE).await;
 
     if dedup_map.is_empty() && !errors.is_empty() {
         return Err(SearchError::Request("all engines failed".to_string()));
@@ -88,11 +88,12 @@ pub async fn fetch_raw_results(
         tasks.spawn(async move {
             let name = engine.name().to_string();
             // Per-engine timeout based on weight: high-quality engines get
-            // more time, low-quality ones are dropped fast.
+            // more time, low-quality ones are dropped fast. Capped below the
+            // global fan-out deadline.
             let timeout = match engine.weight() {
-                w if w >= 1.5 => Duration::from_secs(3),
-                w if w >= 1.0 => Duration::from_millis(1500),
-                _ => Duration::from_millis(800),
+                w if w >= 1.5 => Duration::from_millis(1500),
+                w if w >= 1.0 => Duration::from_millis(1000),
+                _ => Duration::from_millis(600),
             };
             let result = tokio::time::timeout(timeout, engine.search(&q)).await;
             match result {
@@ -106,9 +107,9 @@ pub async fn fetch_raw_results(
     let mut errors: Vec<EngineErrorInfo> = Vec::new();
 
     // Minimum results before we stop waiting for slow engines.
-    // 5 is enough for the reranker to produce a top-10 list; waiting for
-    // more increases tail latency without much quality gain.
-    const MIN_RESULTS: usize = 5;
+    // Cap at 20 to avoid waiting too long; floor at 5 so the reranker has
+    // enough candidates even for small max_results.
+    let min_results = query.max_results.clamp(5, 20);
 
     let deadline = tokio::time::Instant::now() + deadline;
     loop {
@@ -148,7 +149,7 @@ pub async fn fetch_raw_results(
                 }
 
                 // Enough results: stop waiting for slow engines.
-                if dedup_map.len() >= MIN_RESULTS {
+                if dedup_map.len() >= min_results {
                     tasks.abort_all();
                     break;
                 }
