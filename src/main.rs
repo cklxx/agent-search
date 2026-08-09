@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
 
     let strategy = get_strategy(&config.strategy).unwrap_or_else(|| {
         tracing::warn!("unknown strategy '{}', falling back to bm25", config.strategy);
-        Box::new(agent_search::ranking::Bm25Strategy)
+        Arc::new(agent_search::ranking::Bm25Strategy)
     });
     tracing::info!("ranking strategy: {}", strategy.name());
 
@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         cache,
         suspension,
         local_index,
-        strategy: Arc::from(strategy),
+        strategy,
         request_timeout,
         upstream_search_url: config.upstream_search_url.clone(),
         upstream_api_key: config.upstream_api_key.clone(),
@@ -124,7 +124,7 @@ async fn warmup(state: &AppState, queries: &[String]) {
             &query,
             &state.registry,
             &state.suspension,
-            state.strategy.as_ref(),
+            state.strategy.clone(),
         )
         .await
         {

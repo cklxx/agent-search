@@ -1,6 +1,7 @@
 //! Search aggregation: fan out, dedup, score, sort.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinSet;
@@ -17,16 +18,22 @@ pub async fn aggregate(
     query: &SearchQuery,
     registry: &EngineRegistry,
     suspension: &EngineSuspensionManager,
-    strategy: &dyn RankingStrategy,
+    strategy: Arc<dyn RankingStrategy>,
 ) -> EngineResult<SearchResponse> {
     let (dedup_map, errors) = fetch_raw_results(query, registry, suspension).await;
 
-    // If every engine failed, return an error so the caller can return 5xx.
     if dedup_map.is_empty() && !errors.is_empty() {
         return Err(SearchError::Request("all engines failed".to_string()));
     }
 
-    let results = score_results(dedup_map, query, strategy);
+    // Score on a blocking thread: cross-encoder reranking is CPU-heavy and
+    // must not block the tokio runtime.
+    let query_clone = query.clone();
+    let results = tokio::task::spawn_blocking(move || {
+        score_results(dedup_map, &query_clone, strategy.as_ref())
+    })
+    .await
+    .map_err(|e| SearchError::Request(format!("scoring task panicked: {}", e)))?;
 
     Ok(SearchResponse {
         query: query.query.clone(),

@@ -71,7 +71,7 @@ pub async fn search(
 
     let result = tokio::time::timeout(
         state.request_timeout,
-        aggregator::aggregate(&query, &state.registry, &state.suspension, state.strategy.as_ref()),
+        aggregator::aggregate(&query, &state.registry, &state.suspension, state.strategy.clone()),
     )
     .await;
 
@@ -162,8 +162,27 @@ pub async fn search_ab(
         }
     };
 
-    let results_a = aggregator::score_results(dedup_map.clone(), &query, strategy_a.as_ref());
-    let results_b = aggregator::score_results(dedup_map, &query, strategy_b.as_ref());
+    // Score both strategies in parallel on blocking threads.
+    let query_clone = query.clone();
+    let dedup_map_clone = dedup_map.clone();
+    let a_handle = tokio::task::spawn_blocking(move || {
+        aggregator::score_results(dedup_map_clone, &query_clone, strategy_a.as_ref())
+    });
+    let query_clone = query.clone();
+    let b_handle = tokio::task::spawn_blocking(move || {
+        aggregator::score_results(dedup_map, &query_clone, strategy_b.as_ref())
+    });
+
+    let (results_a, results_b) = match tokio::join!(a_handle, b_handle) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "scoring task panicked"})),
+            )
+                .into_response();
+        }
+    };
 
     let urls_a: std::collections::HashSet<&str> = results_a.iter().map(|r| r.url.as_str()).collect();
     let urls_b: std::collections::HashSet<&str> = results_b.iter().map(|r| r.url.as_str()).collect();
@@ -215,7 +234,7 @@ pub async fn search_stream(
     tokio::spawn(async move {
         let response = tokio::time::timeout(
             request_timeout,
-            aggregator::aggregate(&query, &registry, &suspension, strategy.as_ref()),
+            aggregator::aggregate(&query, &registry, &suspension, strategy.clone()),
         )
         .await;
         match response {

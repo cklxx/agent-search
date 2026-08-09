@@ -147,78 +147,64 @@ async fn handle_tools_call(state: &AppState, params: &Value) -> Value {
         ..Default::default()
     };
 
-    // Use upstream search API if configured, otherwise use local aggregator.
+    // Try upstream search first if configured. Fall back to local
+    // aggregator when the upstream returns no results.
+    let mut results: Vec<crate::models::result::SearchResult> = Vec::new();
     if let Some(ref upstream) = state.upstream_search_url {
-        let results = crate::routes::search_upstream(
+        results = crate::routes::search_upstream(
             upstream,
             state.upstream_api_key.as_deref(),
             &query.query,
         )
         .await;
-
-        let results_json: Vec<Value> = results
-            .iter()
-            .map(|r| {
-                json!({
-                    "title": r.title,
-                    "url": r.url,
-                    "snippet": r.snippet,
-                    "score": r.score,
-                })
-            })
-            .collect();
-
-        let text = serde_json::to_string_pretty(&results_json).unwrap_or_default();
-
-        return json!({
-            "result": {
-                "resultType": "complete",
-                "content": [{ "type": "text", "text": text }],
-                "structuredContent": { "results": results_json }
-            }
-        });
-    }
-
-    match aggregator::aggregate(
-        &query,
-        &state.registry,
-        &state.suspension,
-        state.strategy.as_ref(),
-    )
-    .await
-    {
-        Ok(response) => {
-            let results: Vec<Value> = response
-                .results
-                .iter()
-                .map(|r| {
-                    json!({
-                        "title": r.title,
-                        "url": r.url,
-                        "snippet": r.snippet,
-                        "score": r.score,
-                    })
-                })
-                .collect();
-
-            let text = serde_json::to_string_pretty(&results).unwrap_or_default();
-
-            json!({
-                "result": {
-                    "resultType": "complete",
-                    "content": [{ "type": "text", "text": text }],
-                    "structuredContent": { "results": results }
-                }
-            })
+        if results.is_empty() {
+            tracing::warn!("upstream search returned no results, falling back to local aggregator");
         }
-        Err(e) => json!({
-            "result": {
-                "resultType": "complete",
-                "isError": true,
-                "content": [{ "type": "text", "text": format!("search failed: {}", e) }]
-            }
-        }),
     }
+
+    if results.is_empty() {
+        match aggregator::aggregate(
+            &query,
+            &state.registry,
+            &state.suspension,
+            state.strategy.clone(),
+        )
+        .await
+        {
+            Ok(response) => results = response.results,
+            Err(e) => {
+                return json!({
+                    "result": {
+                        "resultType": "complete",
+                        "isError": true,
+                        "content": [{ "type": "text", "text": format!("search failed: {}", e) }]
+                    }
+                });
+            }
+        }
+    }
+
+    let results_json: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            json!({
+                "title": r.title,
+                "url": r.url,
+                "snippet": r.snippet,
+                "score": r.score,
+            })
+        })
+        .collect();
+
+    let text = serde_json::to_string_pretty(&results_json).unwrap_or_default();
+
+    json!({
+        "result": {
+            "resultType": "complete",
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": { "results": results_json }
+        }
+    })
 }
 
 /// Legacy HTTP+SSE transport: GET /mcp/sse opens an SSE stream.

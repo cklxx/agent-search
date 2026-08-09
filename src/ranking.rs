@@ -1,6 +1,7 @@
 //! Pluggable ranking strategies for A/B comparison.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
@@ -318,28 +319,40 @@ impl RankingStrategy for SearxngOnlyStrategy {
     }
 }
 
-/// Cross-encoder reranking with bge-reranker-v2-m3 (2026 SOTA multilingual).
-/// Computes query-document relevance via full cross-attention.
+/// Cross-encoder reranking with jina-reranker-v2-base-multilingual.
+/// Uses a pool of reranker instances so concurrent requests don't serialize
+/// on a single Mutex. Each instance independently rebuilds to reclaim onnx
+/// runtime memory.
 pub struct BgeRerankerStrategy {
-    reranker: Mutex<TextRerank>,
-    /// Number of batch rerank calls. Used to periodically rebuild the reranker
-    /// to reclaim onnx runtime memory that is not released between calls.
-    call_count: AtomicU64,
+    pool: Vec<Mutex<TextRerank>>,
+    call_counts: Vec<AtomicU64>,
+    next: AtomicUsize,
 }
 
 impl BgeRerankerStrategy {
     pub fn new() -> anyhow::Result<Self> {
-        let reranker = Self::build_reranker()?;
+        // Pool size = min(CPU cores, 8). Each instance loads the full model
+        // (~300MB), so cap to avoid excessive memory.
+        let pool_size = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8);
+        let mut pool = Vec::with_capacity(pool_size);
+        let mut call_counts = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            pool.push(Mutex::new(Self::build_reranker()?));
+            call_counts.push(AtomicU64::new(0));
+        }
         Ok(Self {
-            reranker: Mutex::new(reranker),
-            call_count: AtomicU64::new(0),
+            pool,
+            call_counts,
+            next: AtomicUsize::new(0),
         })
     }
 
     fn build_reranker() -> anyhow::Result<TextRerank> {
         let mut options = RerankInitOptions::default();
         options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
-        // Store model in ./models so it can be bundled with the release.
         options.cache_dir = std::path::PathBuf::from("models");
         TextRerank::try_new(options)
     }
@@ -351,8 +364,6 @@ impl RankingStrategy for BgeRerankerStrategy {
     }
 
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, engine_weight: f32, engines: &[String]) -> f32 {
-        // Delegate to score_batch so both paths share the same memory
-        // reclaim (reranker rebuild) logic.
         let items = [(raw.clone(), engines.to_vec(), engine_weight)];
         self.score_batch(&items, query).pop().unwrap_or(0.0)
     }
@@ -366,12 +377,7 @@ impl RankingStrategy for BgeRerankerStrategy {
             return Vec::new();
         }
 
-        // Two-stage ranking: coarse BM25 to select top-N, then cross-encoder
-        // reranking. Avoids running the expensive cross-encoder on every
-        // result from every engine.
         const TOP_N: usize = 30;
-        // Rebuild the reranker every N calls to reclaim onnx runtime memory.
-        // N=50 bounds memory growth while keeping per-request latency low.
         const REBUILD_EVERY: u64 = 50;
 
         let bm25_scores: Vec<f32> = items
@@ -393,20 +399,21 @@ impl RankingStrategy for BgeRerankerStrategy {
             .map(|&i| {
                 let (raw, _, _) = &items[i];
                 let doc = format!("{} {} {}", raw.title, raw.url, raw.snippet);
-                // Truncate to avoid excessive memory in cross-encoder tokenization.
                 doc.chars().take(512).collect()
             })
             .collect();
 
         let doc_refs: Vec<&str> = documents.iter().map(|s| s.as_str()).collect();
 
-        let count = self.call_count.fetch_add(1, Ordering::Relaxed);
+        // Round-robin pick a reranker instance from the pool.
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.pool.len();
+        let count = self.call_counts[idx].fetch_add(1, Ordering::Relaxed);
         let should_rebuild = count > 0 && count.is_multiple_of(REBUILD_EVERY);
 
         let mut scores = vec![0.0; items.len()];
 
         {
-            let mut reranker = match self.reranker.lock() {
+            let mut reranker = match self.pool[idx].lock() {
                 Ok(r) => r,
                 Err(_) => return scores,
             };
@@ -417,16 +424,12 @@ impl RankingStrategy for BgeRerankerStrategy {
                     let (raw, _, _) = &items[orig_idx];
                     let coverage = query_coverage(&documents[rank], query);
                     let authority = domain_authority(&raw.url);
-                    // Mix ranking: authority² × relevance × coverage.
                     let raw_score = authority * authority * r.score * coverage;
-                    // Clamp to [0, 1] per the RankingStrategy contract.
                     scores[orig_idx] = raw_score.clamp(0.0, 1.0);
                 }
             }
 
             if should_rebuild {
-                // Drop the old reranker and build a fresh one to reclaim
-                // onnx runtime memory that accumulates across calls.
                 if let Ok(new_reranker) = Self::build_reranker() {
                     *reranker = new_reranker;
                 } else {
@@ -458,18 +461,18 @@ fn query_coverage(document: &str, query: &SearchQuery) -> f32 {
     matched / query_terms.len() as f32
 }
 
-pub fn get_strategy(name: &str) -> Option<Box<dyn RankingStrategy>> {
+pub fn get_strategy(name: &str) -> Option<Arc<dyn RankingStrategy>> {
     match name {
-        "bm25" => Some(Box::new(Bm25Strategy)),
-        "tfidf" => Some(Box::new(TfIdfStrategy)),
-        "position_only" => Some(Box::new(PositionOnlyStrategy)),
-        "engine_weight" => Some(Box::new(EngineWeightStrategy)),
-        "bm25_title_boost" => Some(Box::new(Bm25TitleBoostStrategy)),
-        "searxng_only" => Some(Box::new(SearxngOnlyStrategy)),
+        "bm25" => Some(Arc::new(Bm25Strategy)),
+        "tfidf" => Some(Arc::new(TfIdfStrategy)),
+        "position_only" => Some(Arc::new(PositionOnlyStrategy)),
+        "engine_weight" => Some(Arc::new(EngineWeightStrategy)),
+        "bm25_title_boost" => Some(Arc::new(Bm25TitleBoostStrategy)),
+        "searxng_only" => Some(Arc::new(SearxngOnlyStrategy)),
         "bge_reranker" => match BgeRerankerStrategy::new() {
-            Ok(s) => Some(Box::new(s)),
+            Ok(s) => Some(Arc::new(s)),
             Err(e) => {
-                eprintln!("Failed to load bge-reranker-v2-m3: {}", e);
+                eprintln!("Failed to load jina-reranker-v2: {}", e);
                 None
             }
         },
