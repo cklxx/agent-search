@@ -11,6 +11,7 @@ use agent_search::config::Config;
 use agent_search::engine::engines::builtin_registry;
 use agent_search::engine::EngineSuspensionManager;
 use agent_search::index::LocalIndex;
+use agent_search::mcp::{mcp_messages, mcp_post, mcp_sse};
 use agent_search::ranking::get_strategy;
 use agent_search::routes::{AppState, fetch_content, health, list_engines, list_strategies, search, search_ab, search_stream};
 
@@ -54,6 +55,8 @@ async fn main() -> anyhow::Result<()> {
         local_index,
         strategy: Arc::from(strategy),
         request_timeout,
+        upstream_search_url: config.upstream_search_url.clone(),
+        upstream_api_key: config.upstream_api_key.clone(),
     };
 
     // Warmup: preheat the ranking model and populate caches for common queries.
@@ -66,7 +69,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/search", post(search))
         .route("/search/ab", post(search_ab))
         .route("/search/stream", post(search_stream))
-        .route("/content", get(fetch_content))
+        .route("/content", get(fetch_content));
+
+    // MCP server (Streamable HTTP + legacy SSE transport).
+    let app = if config.mcp_enabled {
+        let mcp_path = config.mcp_path.trim_end_matches('/').to_string();
+        let sse_path = format!("{}/sse", mcp_path);
+        let messages_path = format!("{}/messages", mcp_path);
+        app.route(&mcp_path, axum::routing::post(mcp_post))
+            .route(&sse_path, get(mcp_sse))
+            .route(&messages_path, post(mcp_messages))
+    } else {
+        app
+    };
+
+    let app = app
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

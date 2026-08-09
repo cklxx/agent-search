@@ -25,6 +25,10 @@ pub struct AppState {
     pub local_index: Arc<LocalIndex>,
     pub strategy: Arc<dyn RankingStrategy>,
     pub request_timeout: std::time::Duration,
+    /// Upstream search API base URL. When set, /search uses this upstream.
+    pub upstream_search_url: Option<String>,
+    /// API key for the upstream search API.
+    pub upstream_api_key: Option<String>,
 }
 
 /// POST /search
@@ -32,6 +36,11 @@ pub async fn search(
     State(state): State<AppState>,
     Json(query): Json<SearchQuery>,
 ) -> impl IntoResponse {
+    // Use upstream search API if configured.
+    if let Some(ref upstream) = state.upstream_search_url {
+        return proxy_search(upstream, state.upstream_api_key.as_deref(), &query).await;
+    }
+
     let key = cache_key(&query.query, query.page, query.max_results);
 
     if let Some(cached) = state.cache.get(&key).await {
@@ -230,4 +239,173 @@ pub async fn fetch_content(
         )
             .into_response(),
     }
+}
+
+/// Call the upstream LLM relay's web_search tool and return parsed results.
+/// Retries up to 3 times if the model reports no web search access.
+pub async fn search_upstream(
+    upstream: &str,
+    api_key: Option<&str>,
+    query: &str,
+) -> Vec<crate::models::result::SearchResult> {
+    let url = format!("{}/v1/chat/completions", upstream.trim_end_matches('/'));
+
+    let prompt = format!(
+        "Search the web for: {}. List the top results as a numbered list. \
+         For each result, provide the title, the URL, and a one-sentence snippet. \
+         Format: \\n1. **Title** — https://example.com\\n   - Snippet text here.",
+        query
+    );
+
+    let body = serde_json::json!({
+        "model": "model_api/experimental_0723",
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": [{"type": "web_search", "search_context_size": "high"}],
+        "max_tokens": 4096,
+    });
+
+    let client = reqwest::Client::new();
+    let mut last_content = String::new();
+
+    for attempt in 0..3 {
+        let mut req = client.post(&url).json(&body);
+        if let Some(key) = api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let text = match req.send().await {
+            Ok(resp) => match resp.text().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
+
+        let content = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/choices/0/message/content")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+
+        last_content = content.clone();
+        let results = parse_search_results(&content);
+        if !results.is_empty() {
+            return results;
+        }
+
+        // If the model says it can't search, retry.
+        if !content.contains("don't have") && !content.contains("cannot") {
+            break;
+        }
+        tracing::warn!("upstream search attempt {} failed, retrying", attempt + 1);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    parse_search_results(&last_content)
+}
+
+/// Search via an upstream LLM relay that supports the `web_search` tool.
+async fn proxy_search(
+    upstream: &str,
+    api_key: Option<&str>,
+    query: &SearchQuery,
+) -> axum::response::Response {
+    let results = search_upstream(upstream, api_key, &query.query).await;
+    let response = crate::models::result::SearchResponse {
+        query: query.query.clone(),
+        results,
+        errors: Vec::new(),
+    };
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Parse search results from the model's text output.
+/// Supports both JSON array and numbered list formats.
+pub fn parse_search_results(content: &str) -> Vec<crate::models::result::SearchResult> {
+    // Try JSON array first.
+    if let Some(results) = parse_json_results(content) {
+        if !results.is_empty() {
+            return results;
+        }
+    }
+    // Fall back to numbered list format.
+    parse_numbered_list(content)
+}
+
+fn parse_json_results(content: &str) -> Option<Vec<crate::models::result::SearchResult>> {
+    let start = content.find('[')?;
+    let end = content.rfind(']')?;
+    if end <= start {
+        return None;
+    }
+    let json_str = &content[start..=end];
+    let items: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
+
+    let results: Vec<_> = items
+        .into_iter()
+        .filter_map(|item| {
+            let title = item.get("title").and_then(|v| v.as_str())?.to_string();
+            let url = item.get("url").and_then(|v| v.as_str())?.to_string();
+            let snippet = item
+                .get("snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(crate::models::result::SearchResult {
+                title,
+                url,
+                snippet,
+                published_date: None,
+                score: 0.0,
+                engines: vec!["upstream".to_string()],
+            })
+        })
+        .collect();
+
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
+}
+
+/// Parse numbered list format:
+/// 1. **Title** — URL
+///    - Snippet
+fn parse_numbered_list(content: &str) -> Vec<crate::models::result::SearchResult> {
+    let re = regex::Regex::new(r"^\d+\.\s+\*\*(.+?)\*\*\s*[—-]\s*(https?://\S+)").unwrap();
+    let mut results = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if let Some(caps) = re.captures(line) {
+            let title = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let url = caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let mut snippet = String::new();
+            // Next line might be the snippet: "   - Snippet"
+            if i + 1 < lines.len() {
+                let next = lines[i + 1].trim_start();
+                if let Some(s) = next.strip_prefix("- ") {
+                    snippet = s.to_string();
+                    i += 1;
+                }
+            }
+            if !title.is_empty() && !url.is_empty() {
+                results.push(crate::models::result::SearchResult {
+                    title,
+                    url,
+                    snippet,
+                    published_date: None,
+                    score: 0.0,
+                    engines: vec!["upstream".to_string()],
+                });
+            }
+        }
+        i += 1;
+    }
+    results
 }

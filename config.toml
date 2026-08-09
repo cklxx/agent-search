@@ -1,30 +1,10 @@
-# Agent Search configuration
-
 host = "127.0.0.1"
-port = 8080
-
-# Query cache
+port = 18789
 cache_size = 1000
 cache_ttl_secs = 30
-
-# Ranking strategy: bm25, tfidf, position_only, engine_weight, bm25_title_boost, bge_reranker
 strategy = "bge_reranker"
-
-# Overall request timeout in seconds.
 request_timeout_secs = 15
-
-# Queries to preheat on startup (populates cache + local index).
-warmup_queries = [
-  "rust async runtime",
-  "transformer attention mechanism",
-  "kubernetes pod deployment",
-]
-
-# Proxy pool for engine requests.
-# Proxies are rotated round-robin per request across all engines.
-# Supported schemes: http://, https://, socks5://, socks5h://
-# Leave empty to disable proxies.
-proxy_urls = [
-  # "http://127.0.0.1:7890",
-  # "socks5://127.0.0.1:1080",
-]
+warmup_queries = []
+proxy_urls = []
+mcp_enabled = true
+mcp_path = "/mcp"

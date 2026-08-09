@@ -32,6 +32,38 @@ pub struct Config {
     /// Queries to preheat on startup.
     #[serde(default)]
     pub warmup_queries: Vec<String>,
+
+    /// Upstream search API base URL. Defaults to $UPSTREAM_SEARCH_URL.
+    #[serde(default = "default_upstream_search_url")]
+    pub upstream_search_url: Option<String>,
+
+    /// API key for the upstream search API. Defaults to $UPSTREAM_API_KEY.
+    #[serde(default = "default_upstream_api_key")]
+    pub upstream_api_key: Option<String>,
+
+    /// Enable the built-in MCP server.
+    #[serde(default = "default_true")]
+    pub mcp_enabled: bool,
+
+    /// HTTP path for the MCP server endpoint.
+    #[serde(default = "default_mcp_path")]
+    pub mcp_path: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_mcp_path() -> String {
+    "/mcp".to_string()
+}
+
+fn default_upstream_search_url() -> Option<String> {
+    std::env::var("UPSTREAM_SEARCH_URL").ok()
+}
+
+fn default_upstream_api_key() -> Option<String> {
+    std::env::var("UPSTREAM_API_KEY").ok()
 }
 
 fn default_request_timeout() -> u64 {
@@ -47,7 +79,7 @@ fn default_host() -> String {
 }
 
 fn default_port() -> u16 {
-    8080
+    18789
 }
 
 fn default_cache_size() -> u64 {
@@ -69,6 +101,10 @@ impl Default for Config {
             strategy: default_strategy(),
             request_timeout_secs: default_request_timeout(),
             warmup_queries: Vec::new(),
+            upstream_search_url: default_upstream_search_url(),
+            upstream_api_key: default_upstream_api_key(),
+            mcp_enabled: default_true(),
+            mcp_path: default_mcp_path(),
         }
     }
 }

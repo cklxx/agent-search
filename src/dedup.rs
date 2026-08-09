@@ -4,7 +4,35 @@ use url::Url;
 
 /// Lowercases host, strips tracking params (utm_*, fbclid, ...),
 /// removes trailing slash and fragment.
+/// Also unwraps web.archive.org snapshots to their original URLs.
 pub fn normalize_url(raw: &str) -> String {
+    // Unwrap Wayback Machine snapshots:
+    // https://web.archive.org/web/20220312110024/https://github.com/...
+    // -> https://github.com/...
+    if let Some(rest) = raw.strip_prefix("https://web.archive.org/web/") {
+        if let Some(idx) = rest.find('/') {
+            let after_ts = &rest[idx + 1..];
+            if after_ts.starts_with("http://") || after_ts.starts_with("https://") {
+                return normalize_url(after_ts);
+            }
+        }
+    }
+
+    // Unwrap archive.org github repo snapshots:
+    // https://archive.org/details/github.com-user-repo_-_2022-03-12_11-00-24
+    // -> https://github.com/user/repo
+    if let Some(rest) = raw.strip_prefix("https://archive.org/details/github.com-") {
+        // Format: github.com-<user>-<repo>_-_<date> or github.com-<user>-<repo>
+        let parts: Vec<&str> = rest.splitn(3, '-').collect();
+        if parts.len() >= 2 {
+            let user = parts[0];
+            let repo = parts[1];
+            if !user.is_empty() && !repo.is_empty() {
+                return format!("https://github.com/{}/{}", user, repo);
+            }
+        }
+    }
+
     let parsed = match Url::parse(raw) {
         Ok(u) => u,
         Err(_) => return raw.to_string(),

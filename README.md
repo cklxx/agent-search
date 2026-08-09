@@ -11,6 +11,8 @@ High-performance search engine for AI agents. A Rust-based metasearch engine tha
 - **URL deduplication**: Normalizes URLs (removes tracking params, lowercases host, strips trailing slashes).
 - **Query caching**: In-memory cache with TTL (moka).
 - **Streaming**: SSE endpoint for progressive result delivery.
+- **Reverse proxy**: Optionally forward `/search` to an upstream search API (e.g. a SearXNG instance). No API key required — just set the upstream URL.
+- **Built-in MCP server**: Exposes a `web_search` tool over the Model Context Protocol, so AI agents (Claude Code, etc.) can search the web directly.
 - **High performance**: async (tokio), parallel sorting (rayon-ready), connection pooling.
 
 ## Architecture
@@ -24,6 +26,7 @@ src/
 ├── ranking.rs           # Relevance scoring
 ├── dedup.rs             # URL normalization
 ├── cache.rs             # Query cache (moka)
+├── mcp.rs               # MCP server (web_search tool)
 ├── models/              # Data types
 │   ├── query.rs         # SearchQuery
 │   ├── result.rs        # SearchResult, RawSearchResult, SearchResponse
@@ -37,7 +40,7 @@ src/
 │       ├── bing.rs
 │       └── brave.rs
 └── routes/
-    └── mod.rs           # HTTP routes (/search, /search/stream, /engines, /health)
+    └── mod.rs           # HTTP routes (/search, /search/stream, /mcp, /engines, /health)
 ```
 
 ## API
@@ -91,6 +94,44 @@ Returns list of registered engine names.
 
 Health check.
 
+### MCP server
+
+The service exposes a Model Context Protocol (MCP) server at the path configured by `mcp_path` (default `/mcp`). It implements the **Streamable HTTP** transport (POST returns JSON-RPC responses) and the legacy **HTTP+SSE** transport (`GET /mcp/sse` + `POST /mcp/messages`).
+
+The server exposes one tool:
+
+| Tool | Input | Description |
+|------|-------|-------------|
+| `web_search` | `{ "query": string }` | Search the web. Returns results with `title`, `url`, `snippet`, `score`. |
+
+Example flow:
+
+```bash
+# 1. initialize
+curl -X POST http://127.0.0.1:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+
+# 2. list tools
+curl -X POST http://127.0.0.1:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# 3. call web_search
+curl -X POST http://127.0.0.1:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"web_search","arguments":{"query":"rust async"}}}'
+```
+
+### Reverse proxy
+
+When `upstream_search_url` is set in `config.toml`, `POST /search` forwards the request body to `<upstream_search_url>/search` and returns the upstream response verbatim. When unset, the built-in multi-engine aggregator is used.
+
+```toml
+upstream_search_url = "https://your-searxng.example.com"
+```
+
 ## Configuration
 
 Edit `config.toml`:
@@ -98,11 +139,47 @@ Edit `config.toml`:
 ```toml
 host = "127.0.0.1"
 port = 8080
-request_timeout = 10
 cache_size = 1000
 cache_ttl_secs = 30
-searxng_url = "http://127.0.0.1:39217"
+strategy = "bge_reranker"
+request_timeout_secs = 15
+
+# Built-in MCP server.
+mcp_enabled = true
+mcp_path = "/mcp"
 ```
+
+### Upstream search API (optional)
+
+To use an upstream LLM relay with a `web_search` tool (e.g. super-relay)
+instead of the local multi-engine aggregator, set environment variables:
+
+```bash
+export UPSTREAM_SEARCH_URL="https://super-relay.byted.org"
+export UPSTREAM_API_KEY="your-auth-token"
+```
+
+When `UPSTREAM_SEARCH_URL` is set, both `POST /search` and the MCP `web_search`
+tool forward queries to the upstream and parse the returned JSON results.
+
+### MCP server
+
+The MCP endpoint is `http://{host}:{port}{mcp_path}` (default `http://127.0.0.1:8080/mcp`).
+
+To use it with Claude Code, add to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "agent-search": {
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+The server exposes a `web_search` tool: `{ "query": string }` → results with
+`title`, `url`, `snippet`, `score`.
 
 ## Run
 

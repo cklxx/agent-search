@@ -1,5 +1,6 @@
 //! Pluggable ranking strategies for A/B comparison.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
@@ -41,6 +42,9 @@ fn domain_authority(url: &str) -> f32 {
         // LLM / AI
         ("huggingface.co", 1.4),
         ("openai.com", 1.3),
+        // Low-quality mirrors / snapshots — downrank
+        ("archive.org", 0.5),
+        ("web.archive.org", 0.5),
     ];
 
     AUTHORITIES
@@ -278,16 +282,24 @@ impl RankingStrategy for SearxngOnlyStrategy {
 /// Computes query-document relevance via full cross-attention.
 pub struct BgeRerankerStrategy {
     reranker: Mutex<TextRerank>,
+    /// Number of batch rerank calls. Used to periodically rebuild the reranker
+    /// to reclaim onnx runtime memory that is not released between calls.
+    call_count: AtomicU64,
 }
 
 impl BgeRerankerStrategy {
     pub fn new() -> anyhow::Result<Self> {
-        let mut options = RerankInitOptions::default();
-        options.model_name = RerankerModel::BGERerankerV2M3;
-        let reranker = TextRerank::try_new(options)?;
+        let reranker = Self::build_reranker()?;
         Ok(Self {
             reranker: Mutex::new(reranker),
+            call_count: AtomicU64::new(0),
         })
+    }
+
+    fn build_reranker() -> anyhow::Result<TextRerank> {
+        let mut options = RerankInitOptions::default();
+        options.model_name = RerankerModel::BGERerankerV2M3;
+        TextRerank::try_new(options)
     }
 }
 
@@ -298,6 +310,7 @@ impl RankingStrategy for BgeRerankerStrategy {
 
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, _engine_weight: f32, _engines: &[String]) -> f32 {
         let document = format!("{} {} {}", raw.title, raw.url, raw.snippet);
+        let document: String = document.chars().take(512).collect();
         let mut reranker = match self.reranker.lock() {
             Ok(r) => r,
             Err(_) => return 0.0,
@@ -324,6 +337,8 @@ impl RankingStrategy for BgeRerankerStrategy {
         // reranking. Avoids running the expensive cross-encoder on every
         // result from every engine.
         const TOP_N: usize = 30;
+        // Rebuild the reranker every N calls to reclaim onnx runtime memory.
+        const REBUILD_EVERY: u64 = 1;
 
         let bm25_scores: Vec<f32> = items
             .iter()
@@ -343,23 +358,39 @@ impl RankingStrategy for BgeRerankerStrategy {
             .iter()
             .map(|&i| {
                 let (raw, _, _) = &items[i];
-                format!("{} {} {}", raw.title, raw.url, raw.snippet)
+                let doc = format!("{} {} {}", raw.title, raw.url, raw.snippet);
+                // Truncate to avoid excessive memory in cross-encoder tokenization.
+                doc.chars().take(512).collect()
             })
             .collect();
 
         let doc_refs: Vec<&str> = documents.iter().map(|s| s.as_str()).collect();
 
-        let mut reranker = match self.reranker.lock() {
-            Ok(r) => r,
-            Err(_) => return vec![0.0; items.len()],
-        };
+        let count = self.call_count.fetch_add(1, Ordering::Relaxed);
+        let should_rebuild = count > 0 && count.is_multiple_of(REBUILD_EVERY);
 
         let mut scores = vec![0.0; items.len()];
-        if let Ok(results) = reranker.rerank(query.query.as_str(), doc_refs, false, None) {
-            for (rank, r) in results.iter().enumerate() {
-                let orig_idx = top_indices[rank];
-                let coverage = query_coverage(&documents[rank], query);
-                scores[orig_idx] = r.score * coverage * coverage;
+
+        {
+            let mut reranker = match self.reranker.lock() {
+                Ok(r) => r,
+                Err(_) => return scores,
+            };
+
+            if let Ok(results) = reranker.rerank(query.query.as_str(), doc_refs, false, None) {
+                for (rank, r) in results.iter().enumerate() {
+                    let orig_idx = top_indices[rank];
+                    let coverage = query_coverage(&documents[rank], query);
+                    scores[orig_idx] = r.score * coverage * coverage;
+                }
+            }
+
+            if should_rebuild {
+                // Drop the old reranker and build a fresh one to reclaim
+                // onnx runtime memory that accumulates across calls.
+                if let Ok(new_reranker) = Self::build_reranker() {
+                    *reranker = new_reranker;
+                }
             }
         }
 

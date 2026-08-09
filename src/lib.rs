@@ -7,6 +7,7 @@ pub mod dedup;
 pub mod engine;
 pub mod fetcher;
 pub mod index;
+pub mod mcp;
 pub mod models;
 pub mod proxy;
 pub mod ranking;
