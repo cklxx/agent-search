@@ -24,6 +24,18 @@ pub struct Config {
 
     #[serde(default = "default_strategy")]
     pub strategy: String,
+
+    /// Overall request timeout in seconds.
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout_secs: u64,
+
+    /// Queries to preheat on startup.
+    #[serde(default)]
+    pub warmup_queries: Vec<String>,
+}
+
+fn default_request_timeout() -> u64 {
+    15
 }
 
 fn default_strategy() -> String {
@@ -55,6 +67,8 @@ impl Default for Config {
             cache_ttl_secs: default_cache_ttl(),
             proxy_urls: Vec::new(),
             strategy: default_strategy(),
+            request_timeout_secs: default_request_timeout(),
+            warmup_queries: Vec::new(),
         }
     }
 }

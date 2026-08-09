@@ -24,6 +24,7 @@ pub struct AppState {
     pub suspension: Arc<EngineSuspensionManager>,
     pub local_index: Arc<LocalIndex>,
     pub strategy: Arc<dyn RankingStrategy>,
+    pub request_timeout: std::time::Duration,
 }
 
 /// POST /search
@@ -48,16 +49,27 @@ pub async fn search(
         return (StatusCode::OK, Json((*response).clone())).into_response();
     }
 
-    match aggregator::aggregate(&query, &state.registry, &state.suspension, state.strategy.as_ref()).await {
-        Ok(response) => {
+    let result = tokio::time::timeout(
+        state.request_timeout,
+        aggregator::aggregate(&query, &state.registry, &state.suspension, state.strategy.as_ref()),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(response)) => {
             let _ = state.local_index.cache_results(&query.query, &response.results);
             let response = Arc::new(response);
             state.cache.insert(key, response.clone()).await;
             (StatusCode::OK, Json((*response).clone())).into_response()
         }
-        Err(e) => (
+        Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({"error": "search timed out"})),
         )
             .into_response(),
     }

@@ -72,24 +72,51 @@ impl LocalIndex {
         Ok(())
     }
 
-    /// BM25 search across the query field only.
+    /// BM25 search across the query field for exact cached queries,
+    /// falling back to title/snippet/url full-text search for similar queries.
     /// Returns cached results for queries textually similar to `query`.
     pub fn search_cached(&self, query: &str) -> Option<Vec<SearchResult>> {
         let reader = self.index.reader().ok()?;
         let searcher = reader.searcher();
 
-        // Search only on the query field — we want results cached for similar
-        // queries, not results whose content happens to share words.
+        // First, try exact match on the query field (cached results).
         let query_parser = QueryParser::for_index(&self.index, vec![self.query_field]);
-        let parsed_query = query_parser.parse_query(query).ok()?;
+        if let Ok(parsed_query) = query_parser.parse_query(query) {
+            if let Ok(top_docs) = searcher.search(&parsed_query, &TopDocs::with_limit(DEFAULT_SEARCH_LIMIT)) {
+                if !top_docs.is_empty() {
+                    return Some(self.collect_results(&searcher, top_docs));
+                }
+            }
+        }
 
-        let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(DEFAULT_SEARCH_LIMIT))
-            .ok()?;
+        // Fallback: full-text search across title, snippet, and url fields.
+        // This acts as a local search index when upstream engines are unavailable.
+        let text_parser = QueryParser::for_index(
+            &self.index,
+            vec![self.title_field, self.snippet_field, self.url_field],
+        );
+        if let Ok(parsed_query) = text_parser.parse_query(query) {
+            if let Ok(top_docs) = searcher.search(&parsed_query, &TopDocs::with_limit(DEFAULT_SEARCH_LIMIT)) {
+                if !top_docs.is_empty() {
+                    return Some(self.collect_results(&searcher, top_docs));
+                }
+            }
+        }
 
+        None
+    }
+
+    fn collect_results(
+        &self,
+        searcher: &tantivy::Searcher,
+        top_docs: Vec<(f32, tantivy::DocAddress)>,
+    ) -> Vec<SearchResult> {
         let mut results = Vec::with_capacity(top_docs.len());
         for (_score, doc_address) in top_docs {
-            let retrieved_doc = searcher.doc(doc_address).ok()?;
+            let retrieved_doc = match searcher.doc(doc_address) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
             let title = field_str(&retrieved_doc, self.title_field);
             let url = field_str(&retrieved_doc, self.url_field);
             let snippet = field_str(&retrieved_doc, self.snippet_field);
@@ -108,8 +135,7 @@ impl LocalIndex {
                 engines: vec![engine],
             });
         }
-
-        if results.is_empty() { None } else { Some(results) }
+        results
     }
 }
 

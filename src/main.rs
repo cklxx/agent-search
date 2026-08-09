@@ -45,13 +45,19 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("ranking strategy: {}", strategy.name());
 
+    let request_timeout = Duration::from_secs(config.request_timeout_secs);
+
     let state = AppState {
         registry: Arc::new(registry),
         cache,
         suspension,
         local_index,
         strategy: Arc::from(strategy),
+        request_timeout,
     };
+
+    // Warmup: preheat the ranking model and populate caches for common queries.
+    warmup(&state, &config.warmup_queries).await;
 
     let app = Router::new()
         .route("/health", get(health))
@@ -72,4 +78,47 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Preheat the ranking model and populate caches for common queries.
+async fn warmup(state: &AppState, queries: &[String]) {
+    tracing::info!("warming up ranking model...");
+    // Run a dummy query through the strategy to load/initialize the model.
+    let dummy = agent_search::models::query::SearchQuery {
+        query: "warmup".to_string(),
+        ..Default::default()
+    };
+    let dummy_raw = agent_search::models::result::RawSearchResult {
+        title: "warmup".to_string(),
+        url: "https://example.com".to_string(),
+        snippet: "warmup".to_string(),
+        published_date: None,
+        position: 1,
+    };
+    let _ = state.strategy.score(&dummy_raw, &dummy, 1.0, &[]);
+
+    // Preheat common queries into the cache.
+    for q in queries {
+        let query = agent_search::models::query::SearchQuery {
+            query: q.clone(),
+            ..Default::default()
+        };
+        match agent_search::aggregator::aggregate(
+            &query,
+            &state.registry,
+            &state.suspension,
+            state.strategy.as_ref(),
+        )
+        .await
+        {
+            Ok(response) => {
+                let _ = state.local_index.cache_results(q, &response.results);
+                let key = agent_search::cache::cache_key(q, 0, 10);
+                state.cache.insert(key, Arc::new(response)).await;
+                tracing::info!("warmed up query: {}", q);
+            }
+            Err(e) => tracing::warn!("warmup failed for '{}': {}", q, e),
+        }
+    }
+    tracing::info!("warmup complete");
 }

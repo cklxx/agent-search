@@ -10,6 +10,16 @@ cache_ttl_secs = 30
 # Ranking strategy: bm25, tfidf, position_only, engine_weight, bm25_title_boost, bge_reranker
 strategy = "bge_reranker"
 
+# Overall request timeout in seconds.
+request_timeout_secs = 15
+
+# Queries to preheat on startup (populates cache + local index).
+warmup_queries = [
+  "rust async runtime",
+  "transformer attention mechanism",
+  "kubernetes pod deployment",
+]
+
 # Proxy pool for engine requests.
 # Proxies are rotated round-robin per request across all engines.
 # Supported schemes: http://, https://, socks5://, socks5h://
