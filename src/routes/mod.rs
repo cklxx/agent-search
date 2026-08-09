@@ -469,10 +469,12 @@ fn parse_numbered_list(content: &str) -> Vec<crate::models::result::SearchResult
     results
 }
 
-/// POST /v1/chat/completions — OpenAI-compatible endpoint that handles the
-/// `web_search` tool. When cc is configured with agent-search as its API URL,
-/// built-in web_search tool calls are served directly by the local search
-/// pipeline (no LLM proxying).
+/// POST /v1/chat/completions — OpenAI-compatible endpoint.
+///
+/// Requests with the `web_search` tool are served locally by the search
+/// pipeline. All other requests are transparently proxied to the upstream
+/// LLM relay (super-relay). This lets cc point its API URL at agent-search:
+/// web_search works locally, LLM inference still goes through the relay.
 pub async fn chat_completions(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -487,15 +489,37 @@ pub async fn chat_completions(
         })
         .unwrap_or(false);
 
+    // Non-search requests: proxy to the upstream LLM relay.
     if !has_web_search {
+        if let Some(ref upstream) = state.upstream_search_url {
+            let url = format!("{}/v1/chat/completions", upstream.trim_end_matches('/'));
+            let mut req = state.http_client.post(&url).json(&body);
+            if let Some(key) = state.upstream_api_key.as_deref() {
+                req = req.header("Authorization", format!("Bearer {}", key));
+            }
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return (status, text).into_response();
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": format!("upstream proxy failed: {}", e)})),
+                    )
+                        .into_response();
+                }
+            }
+        }
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "only web_search tool is supported"})),
+            Json(serde_json::json!({"error": "no upstream LLM configured"})),
         )
             .into_response();
     }
 
-    // Extract query from the last user message.
+    // web_search tool: serve locally.
     let query = body
         .get("messages")
         .and_then(|m| m.as_array())
@@ -519,7 +543,6 @@ pub async fn chat_completions(
     };
     let results = search_with_fallback(&state, &search_query).await;
 
-    // Format as a numbered list so the model can cite sources.
     let content = if results.is_empty() {
         "No search results found.".to_string()
     } else {

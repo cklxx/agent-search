@@ -108,6 +108,17 @@ impl ConfigurableEngine {
         let data: serde_json::Value =
             serde_json::from_str(body).map_err(|e| SearchError::Parse(e.to_string()))?;
 
+        // Detect API error responses (e.g. Stack Exchange throttle_violation).
+        // These return HTTP 200 with an error body, not a 4xx status, so we
+        // check for common error fields and treat them as rate-limit errors
+        // to trigger the 180s suspension instead of noisy parse-error retries.
+        if data.get("error").is_some()
+            || data.get("error_message").is_some()
+            || data.get("error_id").is_some()
+        {
+            return Err(SearchError::HttpStatus(429));
+        }
+
         let results_array = get_json_path(&data, &queries.results)
             .and_then(|v| v.as_array())
             .ok_or_else(|| SearchError::Parse("results array not found".to_string()))?;
