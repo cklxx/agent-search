@@ -1,0 +1,962 @@
+# Engine configurations for agent-search
+# Migrated from SearXNG engine definitions.
+#
+# Two types:
+#   html: CSS selector-based scraping
+#   json: JSON API field mapping
+#
+# URL placeholders: {query}, {pageno}, {lang}, {time_range}, {safe_search}
+
+# --- JSON API engines ---
+
+- name: wikipedia
+  type: json
+  categories: [general, wikimedia]
+  weight: 2.0
+  search_url: "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://en.wikipedia.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: github
+  type: json
+  categories: [general, repos]
+  weight: 1.5
+  search_url: "https://api.github.com/search/repositories?q={query}&per_page=10"
+  json:
+    results: "items"
+    url: "html_url"
+    title: "full_name"
+    content: "description"
+
+- name: hackernews
+  type: json
+  categories: [general, news]
+  weight: 1.2
+  search_url: "https://hn.algolia.com/api/v1/search?query={query}&tags=story"
+  json:
+    results: "hits"
+    url: "url"
+    title: "title"
+    content: "story_text"
+
+- name: arxiv
+  type: xml
+  categories: [science, scientific publications]
+  weight: 1.5
+  search_url: "https://export.arxiv.org/api/query?search_query=all:{query}&max_results=10"
+  html:
+    results: "entry"
+    url: "id"
+    title: "title"
+    content: "summary"
+
+- name: npm
+  type: json
+  categories: [packages, it]
+  weight: 1.3
+  search_url: "https://registry.npmjs.org/-/v1/search?text={query}&size=10"
+  json:
+    results: "objects"
+    url: "package/links/npm"
+    title: "package/name"
+    content: "package/description"
+
+- name: crates
+  type: json
+  categories: [packages, cargo]
+  weight: 1.3
+  search_url: "https://crates.io/api/v1/crates?q={query}&per_page=10"
+  json:
+    results: "crates"
+    url: "id"
+    url_prefix: "https://crates.io/crates/"
+    title: "name"
+    content: "description"
+
+- name: pypi
+  type: html
+  categories: [packages]
+  weight: 1.2
+  search_url: "https://pypi.org/search/?q={query}"
+  html:
+    results: ".package-snippet"
+    url: "a.package-snippet__name"
+    title: "span.package-snippet__name"
+    content: "p.package-snippet__description"
+
+- name: stackoverflow
+  type: html
+  categories: [it, q&a]
+  weight: 1.8
+  search_url: "https://stackoverflow.com/search?q={query}"
+  html:
+    results: ".question-summary"
+    url: "a.question-hyperlink"
+    title: "a.question-hyperlink"
+    content: ".excerpt"
+
+- name: reddit
+  type: json
+  categories: [general, social media]
+  search_url: "https://www.reddit.com/search.json?q={query}&limit=10"
+  json:
+    results: "data/children"
+    url: "data/url"
+    title: "data/title"
+    content: "data/selftext"
+
+- name: mdn
+  type: json
+  categories: [it, software wikis]
+  weight: 1.8
+  search_url: "https://developer.mozilla.org/api/v1/search?q={query}&page={pageno}"
+  paging: true
+  json:
+    results: "documents"
+    url: "mdn_url"
+    url_prefix: "https://developer.mozilla.org"
+    title: "title"
+    content: "summary"
+
+- name: duckduckgo
+  type: html
+  categories: [general]
+  weight: 1.2
+  search_url: "https://html.duckduckgo.com/html/?q={query}"
+  method: POST
+  request_body: "q={query}"
+  html:
+    results: ".result"
+    url: ".result__title a"
+    title: ".result__title a"
+    content: ".result__snippet"
+
+- name: bing
+  type: html
+  categories: [general, web]
+  weight: 1.3
+  search_url: "https://www.bing.com/search?q={query}&first={pageno}"
+  paging: true
+  page_size: 10
+  first_page_num: 1
+  html:
+    results: ".b_algo"
+    url: "h2 a"
+    title: "h2 a"
+    content: ".b_caption p"
+
+- name: brave
+  type: html
+  categories: [general, web]
+  weight: 1.3
+  search_url: "https://search.brave.com/search?q={query}&offset={pageno}"
+  paging: true
+  page_size: 10
+  first_page_num: 0
+  html:
+    results: ".snippet"
+    url: ".snippet-url a"
+    title: ".snippet-title"
+    content: ".snippet-description"
+
+- name: startpage
+  type: html
+  categories: [general, web]
+  search_url: "https://www.startpage.com/do/search?query={query}"
+  html:
+    results: ".w-gl__result"
+    url: "a.w-gl__result-title"
+    title: "a.w-gl__result-title"
+    content: "p.w-gl__description"
+
+- name: qwant
+  type: json
+  categories: [general, web]
+  search_url: "https://api.qwant.com/v3/search/web?q={query}&count=10"
+  json:
+    results: "data/result/items/mainline"
+    url: "url"
+    title: "title"
+    content: "desc"
+
+- name: mojeek
+  type: html
+  categories: [general, web]
+  search_url: "https://www.mojeek.com/search?q={query}"
+  html:
+    results: ".result"
+    url: "a.ob"
+    title: "a.ob"
+    content: "p.s"
+
+- name: wikipedia_zh
+  type: json
+  categories: [general, wikimedia]
+  weight: 1.8
+  search_url: "https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://zh.wikipedia.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: baidu
+  type: html
+  categories: [general, web]
+  search_url: "https://www.baidu.com/s?wd={query}&pn={pageno}"
+  paging: true
+  page_size: 10
+  first_page_num: 0
+  html:
+    results: ".result"
+    url: "h3 a"
+    title: "h3 a"
+    content: ".c-abstract"
+
+- name: sogou
+  type: html
+  categories: [general, web]
+  search_url: "https://www.sogou.com/web?query={query}"
+  html:
+    results: ".vrwrap"
+    url: "h3 a"
+    title: "h3 a"
+    content: ".space-txt"
+
+- name: bilibili
+  type: json
+  categories: [videos, social media]
+  search_url: "https://api.bilibili.com/x/web-interface/search/all/v2?keyword={query}"
+  json:
+    results: "data/result"
+    url: "arcurl"
+    title: "title"
+    content: "description"
+
+# --- Additional JSON engines migrated from SearXNG ---
+
+- name: packagist
+  type: json
+  categories: [packages]
+  search_url: "https://packagist.org/search.json?q={query}&page={pageno}"
+  paging: true
+  json:
+    results: "results"
+    url: "url"
+    title: "name"
+    content: "description"
+
+- name: mankier
+  type: json
+  categories: [it]
+  search_url: "https://www.mankier.com/api/v2/mans/?q={query}"
+  json:
+    results: "results"
+    url: "url"
+    title: "name"
+    content: "description"
+
+- name: wiby
+  type: json
+  categories: [general, web]
+  search_url: "https://wiby.me/json/?q={query}&p={pageno}"
+  paging: true
+  json:
+    results: ""
+    url: "URL"
+    title: "Title"
+    content: "Snippet"
+
+- name: crowdview
+  type: json
+  categories: [general, web]
+  search_url: "https://crowdview-next-js.onrender.com/api/search-v3?query={query}"
+  json:
+    results: "results"
+    url: "link"
+    title: "title"
+    content: "snippet"
+
+- name: avalw
+  type: json
+  categories: [general, web]
+  search_url: "https://avalw.org/api/search?q={query}&page={pageno}&limit=10&tbm=all"
+  paging: true
+  json:
+    results: "results"
+    url: "url"
+    title: "title"
+    content: "snippet"
+
+- name: cl0q
+  type: json
+  categories: [general, web]
+  search_url: "https://cl0q.com/search?q={query}&limit=20&offset={pageno}"
+  paging: true
+  page_size: 20
+  json:
+    results: "results"
+    url: "domain"
+    url_prefix: "https://"
+    title: "title"
+    content: "description"
+
+- name: rawweb
+  type: json
+  categories: [general, web]
+  search_url: "https://api.rawweb.org/api/search?keyword={query}&page={pageno}&lang=*"
+  paging: true
+  json:
+    results: "data"
+    url: "link"
+    title: "title"
+    content: "content"
+
+- name: sina
+  type: json
+  categories: [general, news]
+  search_url: "https://search.sina.com.cn/api/search?q={query}&tp=mix&sort=0&page={pageno}&size=10&from=search_result"
+  paging: true
+  json:
+    results: "data/list"
+    url: "url"
+    title: "title"
+    content: "intro"
+
+- name: lobsters
+  type: html
+  categories: [general, it]
+  search_url: "https://lobste.rs/search?q={query}&what=stories&order=relevance"
+  html:
+    results: ".story"
+    url: "a.u-url"
+    title: "a.u-url"
+    content: ".story_text"
+
+- name: bitbucket
+  type: html
+  categories: [repos]
+  search_url: "https://bitbucket.org/repo/all/{pageno}?name={query}"
+  paging: true
+  html:
+    results: "article.repo-summary"
+    url: "a.repo-link"
+    title: "a.repo-link"
+    content: "p"
+
+- name: hoogle
+  type: html
+  categories: [it]
+  search_url: "https://hoogle.haskell.org/?hoogle={query}"
+  html:
+    results: ".result"
+    url: "a"
+    title: "a"
+    content: ".doc"
+
+- name: pubdev
+  type: html
+  categories: [packages]
+  search_url: "https://pub.dev/packages?q={query}&page={pageno}"
+  paging: true
+  html:
+    results: ".packages-item"
+    url: "a.packages-title"
+    title: "a.packages-title"
+    content: ".packages-description"
+
+- name: tmdb
+  type: html
+  categories: [movies]
+  search_url: "https://www.themoviedb.org/search?page={pageno}&query={query}"
+  paging: true
+  html:
+    results: ".search-result"
+    url: "a"
+    title: "h2"
+    content: "p"
+
+- name: etymonline
+  type: html
+  categories: [dictionaries]
+  search_url: "https://etymonline.com/search?page={pageno}&q={query}"
+  paging: true
+  html:
+    results: ".word--C9UPa"
+    url: "a"
+    title: "a"
+    content: ".word__defination"
+
+- name: anaconda
+  type: html
+  categories: [packages]
+  search_url: "https://anaconda.org/search?q={query}&page={pageno}"
+  paging: true
+  html:
+    results: ".packageList li"
+    url: "a"
+    title: "a"
+    content: "span"
+
+# --- Additional engines migrated from SearXNG ---
+
+- name: google_scholar
+  type: html
+  categories: [science, scientific publications]
+  weight: 1.5
+  search_url: "https://scholar.google.com/scholar?q={query}&start={pageno}"
+  paging: true
+  page_size: 10
+  html:
+    results: ".gs_r.gs_or.gs_scl"
+    url: ".gs_rt a"
+    title: ".gs_rt"
+    content: ".gs_rs"
+
+- name: semantic_scholar
+  type: json
+  categories: [science, scientific publications]
+  weight: 1.5
+  search_url: "https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit=10&fields=title,url,abstract"
+  json:
+    results: "data"
+    url: "url"
+    title: "title"
+    content: "abstract"
+
+- name: pubmed
+  type: json
+  categories: [science, medical]
+  search_url: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={query}&retmax=10&retmode=json"
+  json:
+    results: "esearchresult/idlist"
+    url: ""
+    url_prefix: "https://pubmed.ncbi.nlm.nih.gov/"
+    title: ""
+    content: ""
+
+- name: openlibrary
+  type: json
+  categories: [books]
+  search_url: "https://openlibrary.org/search.json?q={query}&limit=10"
+  json:
+    results: "docs"
+    url: "key"
+    url_prefix: "https://openlibrary.org"
+    title: "title"
+    content: "first_sentence"
+
+- name: gutenberg
+  type: html
+  categories: [books]
+  search_url: "https://www.gutenberg.org/ebooks/search/?query={query}"
+  html:
+    results: "li.booklink"
+    url: "a"
+    title: "span.title"
+    content: "span.subtitle"
+
+- name: archive_org
+  type: json
+  categories: [general, files]
+  search_url: "https://archive.org/advancedsearch.php?q={query}&rows=10&output=json"
+  json:
+    results: "response/docs"
+    url: "identifier"
+    url_prefix: "https://archive.org/details/"
+    title: "title"
+    content: "description"
+
+- name: gitlab
+  type: json
+  categories: [repos, it]
+  search_url: "https://gitlab.com/api/v4/projects?search={query}&per_page=10"
+  json:
+    results: ""
+    url: "web_url"
+    title: "name"
+    content: "description"
+
+- name: dockerhub
+  type: json
+  categories: [packages, it]
+  search_url: "https://hub.docker.com/v2/search/repositories/?query={query}&page_size=10"
+  json:
+    results: "results"
+    url: "repo_name"
+    url_prefix: "https://hub.docker.com/r/"
+    title: "repo_name"
+    content: "short_description"
+
+- name: rubygems
+  type: json
+  categories: [packages]
+  search_url: "https://rubygems.org/api/v1/search.json?query={query}"
+  json:
+    results: ""
+    url: "project_uri"
+    title: "name"
+    content: "info"
+
+- name: searchcode
+  type: json
+  categories: [it, code]
+  search_url: "https://searchcode.com/api/codesearch_I/?q={query}&per_page=10"
+  json:
+    results: "results"
+    url: "url"
+    title: "name"
+    content: "description"
+
+- name: sourcegraph
+  type: html
+  categories: [it, code]
+  search_url: "https://sourcegraph.com/search?q=context:global+{query}&patternType=literal"
+  html:
+    results: ".search-result"
+    url: "a"
+    title: ".search-result-title"
+    content: ".search-result-content"
+
+- name: stackexchange
+  type: json
+  categories: [it, q&a]
+  weight: 1.8
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=stackoverflow&pagesize=10"
+  json:
+    results: "items"
+    url: "link"
+    title: "title"
+    content: "body"
+
+- name: superuser
+  type: json
+  categories: [it, q&a]
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=superuser&pagesize=10"
+  json:
+    results: "items"
+    url: "link"
+    title: "title"
+    content: "body"
+
+- name: askubuntu
+  type: json
+  categories: [it, q&a]
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=askubuntu&pagesize=10"
+  json:
+    results: "items"
+    url: "link"
+    title: "title"
+    content: "body"
+
+- name: mathoverflow
+  type: json
+  categories: [science, math]
+  search_url: "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=mathoverflow&pagesize=10"
+  json:
+    results: "items"
+    url: "link"
+    title: "title"
+    content: "body"
+
+- name: quora
+  type: html
+  categories: [q&a]
+  search_url: "https://www.quora.com/search?q={query}"
+  html:
+    results: ".qu-pb--medium"
+    url: "a"
+    title: "a"
+    content: "span"
+
+- name: imdb
+  type: html
+  categories: [movies]
+  search_url: "https://www.imdb.com/find?q={query}&s=tt"
+  html:
+    results: ".findResult"
+    url: "a"
+    title: "td.result_text a"
+    content: "td.result_text"
+
+- name: rotten_tomatoes
+  type: html
+  categories: [movies]
+  search_url: "https://www.rottentomatoes.com/search?search={query}"
+  html:
+    results: ".search-result"
+    url: "a"
+    title: ".search-result-title"
+    content: ".search-result-synopsis"
+
+- name: genius
+  type: html
+  categories: [music]
+  search_url: "https://genius.com/search?q={query}"
+  html:
+    results: ".search_result"
+    url: "a"
+    title: ".search_result_title"
+    content: ".search_result_snippet"
+
+- name: soundcloud
+  type: html
+  categories: [music]
+  search_url: "https://soundcloud.com/search?q={query}"
+  html:
+    results: ".searchList__item"
+    url: "a"
+    title: ".soundTitle__title"
+    content: ".soundTitle__username"
+
+- name: youtube
+  type: html
+  categories: [videos]
+  search_url: "https://www.youtube.com/results?search_query={query}"
+  html:
+    results: ".yt-lockup-video"
+    url: "a.yt-uix-tile-link"
+    title: "a.yt-uix-tile-link"
+    content: ".yt-lockup-description"
+
+- name: vimeo
+  type: html
+  categories: [videos]
+  search_url: "https://vimeo.com/search?q={query}"
+  html:
+    results: ".search_result"
+    url: "a"
+    title: ".search_result_title"
+    content: ".search_result_description"
+
+- name: dailymotion
+  type: html
+  categories: [videos]
+  search_url: "https://www.dailymotion.com/search/{query}"
+  html:
+    results: ".VideoCard"
+    url: "a"
+    title: ".VideoCard__title"
+    content: ".VideoCard__description"
+
+- name: twitch
+  type: html
+  categories: [videos, games]
+  search_url: "https://www.twitch.tv/search?term={query}"
+  html:
+    results: ".search-result"
+    url: "a"
+    title: ".search-result-title"
+    content: ".search-result-description"
+
+- name: ebay
+  type: html
+  categories: [shopping]
+  search_url: "https://www.ebay.com/sch/i.html?_nkw={query}"
+  html:
+    results: ".s-item"
+    url: "a.s-item__link"
+    title: ".s-item__title"
+    content: ".s-item__price"
+
+- name: amazon
+  type: html
+  categories: [shopping]
+  search_url: "https://www.amazon.com/s?k={query}"
+  html:
+    results: ".s-result-item"
+    url: "a.a-link-normal"
+    title: "h2 a span"
+    content: ".a-price"
+
+- name: indeed
+  type: html
+  categories: [jobs]
+  search_url: "https://www.indeed.com/jobs?q={query}"
+  html:
+    results: ".jobsearch-SerpJobCard"
+    url: "a.jobtitle"
+    title: "a.jobtitle"
+    content: ".summary"
+
+- name: glassdoor
+  type: html
+  categories: [jobs]
+  search_url: "https://www.glassdoor.com/Job/jobs.htm?sc.keyword={query}"
+  html:
+    results: ".jobContainer"
+    url: "a.jobLink"
+    title: "a.jobLink"
+    content: ".jobDescription"
+
+- name: dictionary
+  type: html
+  categories: [dictionaries]
+  search_url: "https://www.dictionary.com/browse/{query}"
+  html:
+    results: ".css-10n3yd7"
+    url: "a"
+    title: "h1"
+    content: ".css-10n3yd7"
+
+- name: thesaurus
+  type: html
+  categories: [dictionaries]
+  search_url: "https://www.thesaurus.com/browse/{query}"
+  html:
+    results: ".css-10n3yd7"
+    url: "a"
+    title: "h1"
+    content: ".css-10n3yd7"
+
+- name: urban_dictionary
+  type: html
+  categories: [dictionaries]
+  search_url: "https://www.urbandictionary.com/define.php?term={query}"
+  html:
+    results: ".definition"
+    url: "a"
+    title: ".word"
+    content: ".meaning"
+
+- name: merriam_webster
+  type: html
+  categories: [dictionaries]
+  search_url: "https://www.merriam-webster.com/dictionary/{query}"
+  html:
+    results: ".entry-attr"
+    url: "a"
+    title: "h1"
+    content: ".dtText"
+
+- name: google_books
+  type: json
+  categories: [books]
+  search_url: "https://www.googleapis.com/books/v1/volumes?q={query}&maxResults=10"
+  json:
+    results: "items"
+    url: "volumeInfo/infoLink"
+    title: "volumeInfo/title"
+    content: "volumeInfo/description"
+
+- name: wikibooks
+  type: json
+  categories: [wikimedia, books]
+  search_url: "https://en.wikibooks.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://en.wikibooks.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: wikiquote
+  type: json
+  categories: [wikimedia]
+  search_url: "https://en.wikiquote.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://en.wikiquote.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: wiktionary
+  type: json
+  categories: [wikimedia, dictionaries]
+  search_url: "https://en.wiktionary.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://en.wiktionary.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: wikisource
+  type: json
+  categories: [wikimedia]
+  search_url: "https://en.wikisource.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://en.wikisource.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: wikiversity
+  type: json
+  categories: [wikimedia]
+  search_url: "https://en.wikiversity.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://en.wikiversity.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: wikinews
+  type: json
+  categories: [wikimedia, news]
+  search_url: "https://en.wikinews.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://en.wikinews.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: wikivoyage
+  type: json
+  categories: [wikimedia, travel]
+  search_url: "https://en.wikivoyage.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://en.wikivoyage.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: wikidata
+  type: json
+  categories: [wikimedia]
+  search_url: "https://www.wikidata.org/w/api.php?action=query&list=search&srsearch={query}&srlimit=10&format=json"
+  json:
+    results: "query/search"
+    url: "title"
+    url_prefix: "https://www.wikidata.org/wiki/"
+    title: "title"
+    content: "snippet"
+
+- name: medium
+  type: html
+  categories: [blogs, it]
+  search_url: "https://medium.com/search?q={query}"
+  html:
+    results: ".postArticle"
+    url: "a"
+    title: "h3"
+    content: "h4"
+
+- name: devto
+  type: json
+  categories: [blogs, it]
+  search_url: "https://dev.to/api/articles?tag={query}&per_page=10"
+  json:
+    results: ""
+    url: "url"
+    title: "title"
+    content: "description"
+
+- name: hashnode
+  type: html
+  categories: [blogs, it]
+  search_url: "https://hashnode.com/search?q={query}"
+  html:
+    results: ".search-result"
+    url: "a"
+    title: ".search-result-title"
+    content: ".search-result-content"
+
+- name: pinterest
+  type: html
+  categories: [social media]
+  search_url: "https://www.pinterest.com/search/pins/?q={query}"
+  html:
+    results: ".Grid__Item"
+    url: "a"
+    title: "h3"
+    content: "p"
+
+- name: instagram
+  type: html
+  categories: [social media]
+  search_url: "https://www.instagram.com/explore/tags/{query}/"
+  html:
+    results: "article"
+    url: "a"
+    title: "img"
+    content: "img"
+
+- name: linkedin
+  type: html
+  categories: [social media]
+  search_url: "https://www.linkedin.com/search/results/all/?keywords={query}"
+  html:
+    results: ".search-result"
+    url: "a"
+    title: ".search-result__title"
+    content: ".search-result__snippet"
+
+- name: facebook
+  type: html
+  categories: [social media]
+  search_url: "https://www.facebook.com/search/top/?q={query}"
+  html:
+    results: "._6rbb"
+    url: "a"
+    title: "._60ba"
+    content: "._6rbb"
+
+- name: twitter
+  type: html
+  categories: [social media, news]
+  search_url: "https://twitter.com/search?q={query}"
+  html:
+    results: ".tweet"
+    url: "a.tweet-timestamp"
+    title: ".fullname"
+    content: ".tweet-text"
+
+- name: yahoo
+  type: html
+  categories: [general]
+  search_url: "https://search.yahoo.com/search?p={query}&b={pageno}"
+  paging: true
+  page_size: 10
+  html:
+    results: ".algo"
+    url: "h3 a"
+    title: "h3"
+    content: ".compText"
+
+- name: yandex
+  type: html
+  categories: [general]
+  search_url: "https://yandex.com/search/?text={query}&p={pageno}"
+  paging: true
+  page_size: 10
+  html:
+    results: ".serp-item"
+    url: "a.link"
+    title: "a.link"
+    content: ".text-container"
+
+- name: ecosia
+  type: html
+  categories: [general]
+  search_url: "https://www.ecosia.org/search?q={query}&p={pageno}"
+  paging: true
+  page_size: 10
+  html:
+    results: ".result"
+    url: "a.result__url"
+    title: "a.result__title"
+    content: ".result__description"
+
+- name: searxng
+  type: json
+  categories: [general]
+  weight: 1.0
+  search_url: "http://127.0.0.1:39217/search?q={query}&format=json&pageno={pageno}"
+  paging: true
+  page_size: 10
+  json:
+    results: "results"
+    url: "url"
+    title: "title"
+    content: "content"
