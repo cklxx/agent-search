@@ -3,9 +3,9 @@
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, STORED, TEXT, Value};
-use tantivy::{doc, Index, IndexWriter, TantivyError};
+use tantivy::query::TermQuery;
+use tantivy::schema::{Field, Schema, STORED, STRING, TEXT, Value};
+use tantivy::{doc, Index, IndexWriter, Term, TantivyError};
 
 use crate::models::result::SearchResult;
 
@@ -72,20 +72,17 @@ impl LocalIndex {
         Ok(())
     }
 
-    /// BM25 search across the query field for exact cached queries,
-    /// falling back to title/snippet/url full-text search for similar queries.
-    /// Returns cached results for queries textually similar to `query`.
+    /// Returns cached results for the exact query. The query field is STRING
+    /// (untokenized), so a TermQuery does exact string matching: "rust" only
+    /// matches results cached for "rust", not "rust async".
     pub fn search_cached(&self, query: &str) -> Option<Vec<SearchResult>> {
         let reader = self.index.reader().ok()?;
         let searcher = reader.searcher();
 
-        // Exact match on the query field. The LocalIndex stores results keyed
-        // by the exact query that produced them; a full-text fallback would
-        // return stale results from unrelated queries.
-        let query_parser = QueryParser::for_index(&self.index, vec![self.query_field]);
-        let parsed_query = query_parser.parse_query(query).ok()?;
+        let term = Term::from_field_text(self.query_field, query);
+        let term_query = TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
         let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(DEFAULT_SEARCH_LIMIT))
+            .search(&term_query, &TopDocs::with_limit(DEFAULT_SEARCH_LIMIT))
             .ok()?;
 
         if top_docs.is_empty() {
@@ -139,7 +136,9 @@ struct IndexFields {
 
 fn build_schema() -> (Schema, IndexFields) {
     let mut schema_builder = Schema::builder();
-    let query = schema_builder.add_text_field("query", TEXT | STORED);
+    // STRING (not tokenized) so exact query matching works: "rust" must not
+    // match results cached for "rust async".
+    let query = schema_builder.add_text_field("query", STRING | STORED);
     let title = schema_builder.add_text_field("title", TEXT | STORED);
     let url = schema_builder.add_text_field("url", TEXT | STORED);
     let snippet = schema_builder.add_text_field("snippet", TEXT | STORED);

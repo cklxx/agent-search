@@ -71,7 +71,8 @@ pub async fn search(
         return (StatusCode::OK, Json((*cached).clone())).into_response();
     }
 
-    if let Some(local_results) = state.local_index.search_cached(&query.query) {
+    if let Some(mut local_results) = state.local_index.search_cached(&query.query) {
+        local_results.truncate(query.max_results);
         let response = crate::models::result::SearchResponse {
             query: query.query.clone(),
             results: local_results,

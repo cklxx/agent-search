@@ -291,26 +291,18 @@ impl SearchEngine for ConfigurableEngine {
         }
 
         let resp = request.send().await?;
-        let status = resp.status();
-        tracing::debug!(engine = %self.config.name, url = %url, status = %status, "engine request");
 
-        if !status.is_success() {
+        if !resp.status().is_success() {
             return Err(SearchError::HttpStatus(resp.status().as_u16()));
         }
 
         let body = resp.text().await?;
 
-        let result = match self.config.engine_type {
+        match self.config.engine_type {
             EngineType::Html => self.parse_html(&body),
             EngineType::Json => self.parse_json(&body),
             EngineType::Xml => self.parse_xml(&body),
-        };
-
-        if let Ok(ref results) = result {
-            tracing::debug!(engine = %self.config.name, count = results.len(), "engine results");
         }
-
-        result
     }
 }
 

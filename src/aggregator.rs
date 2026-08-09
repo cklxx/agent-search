@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::dedup::normalize_url;
@@ -17,6 +18,10 @@ use crate::ranking::RankingStrategy;
 /// usually return within a few hundred ms, slow ones are cut off here.
 pub const ENGINE_FANOUT_DEADLINE: Duration = Duration::from_secs(15);
 
+/// Max concurrent engine requests. Prevents resource contention from
+/// timing out otherwise-fast engines when 30+ engines fire at once.
+const MAX_CONCURRENT_ENGINES: usize = 12;
+
 /// Fan out to non-suspended engines, dedup by URL, score with `strategy`, sort.
 pub async fn aggregate(
     query: &SearchQuery,
@@ -25,6 +30,8 @@ pub async fn aggregate(
     strategy: Arc<dyn RankingStrategy>,
 ) -> EngineResult<SearchResponse> {
     let (dedup_map, errors) = fetch_raw_results(query, registry, suspension, ENGINE_FANOUT_DEADLINE).await;
+
+    tracing::debug!(dedup_count = dedup_map.len(), error_count = errors.len(), "fetch_raw_results complete");
 
     if dedup_map.is_empty() && !errors.is_empty() {
         return Err(SearchError::Request("all engines failed".to_string()));
@@ -38,6 +45,8 @@ pub async fn aggregate(
     })
     .await
     .map_err(|e| SearchError::Request(format!("scoring task panicked: {}", e)))?;
+
+    tracing::debug!(scored_count = results.len(), "score_results complete");
 
     Ok(SearchResponse {
         query: query.query.clone(),
@@ -80,12 +89,18 @@ pub async fn fetch_raw_results(
         .map(|e| (e.name().to_string(), e.weight()))
         .collect();
 
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_ENGINES));
     let mut tasks: JoinSet<(String, EngineResult<Vec<RawSearchResult>>)> = JoinSet::new();
 
     for engine in &engines {
         let engine = engine.clone();
         let q = query.clone();
+        let sem = semaphore.clone();
         tasks.spawn(async move {
+            let _permit = match sem.acquire().await {
+                Ok(p) => p,
+                Err(_) => return (engine.name().to_string(), Err(SearchError::Timeout)),
+            };
             let name = engine.name().to_string();
             // Per-engine timeout based on weight: high-quality engines get
             // more time, low-quality ones are dropped fast. Capped below the
