@@ -36,9 +36,20 @@ pub async fn search(
     State(state): State<AppState>,
     Json(query): Json<SearchQuery>,
 ) -> impl IntoResponse {
-    // Use upstream search API if configured.
+    // Try upstream search API first if configured. Fall back to local
+    // aggregator when the upstream returns no results (e.g. the relay's
+    // web_search tool is intermittently unavailable).
     if let Some(ref upstream) = state.upstream_search_url {
-        return proxy_search(upstream, state.upstream_api_key.as_deref(), &query).await;
+        let results = search_upstream(upstream, state.upstream_api_key.as_deref(), &query.query).await;
+        if !results.is_empty() {
+            let response = crate::models::result::SearchResponse {
+                query: query.query.clone(),
+                results,
+                errors: Vec::new(),
+            };
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+        tracing::warn!("upstream search returned no results, falling back to local aggregator");
     }
 
     let key = cache_key(&query.query, query.page, query.max_results);
@@ -265,61 +276,28 @@ pub async fn search_upstream(
     });
 
     let client = reqwest::Client::new();
-    let mut last_content = String::new();
 
-    for attempt in 0..3 {
-        let mut req = client.post(&url).json(&body);
-        if let Some(key) = api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let text = match req.send().await {
-            Ok(resp) => match resp.text().await {
-                Ok(t) => t,
-                Err(_) => continue,
-            },
-            Err(_) => continue,
-        };
-
-        let content = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| {
-                v.pointer("/choices/0/message/content")
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default();
-
-        last_content = content.clone();
-        let results = parse_search_results(&content);
-        if !results.is_empty() {
-            return results;
-        }
-
-        // If the model says it can't search, retry.
-        if !content.contains("don't have") && !content.contains("cannot") {
-            break;
-        }
-        tracing::warn!("upstream search attempt {} failed, retrying", attempt + 1);
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mut req = client.post(&url).json(&body);
+    if let Some(key) = api_key {
+        req = req.header("Authorization", format!("Bearer {}", key));
     }
 
-    parse_search_results(&last_content)
-}
-
-/// Search via an upstream LLM relay that supports the `web_search` tool.
-async fn proxy_search(
-    upstream: &str,
-    api_key: Option<&str>,
-    query: &SearchQuery,
-) -> axum::response::Response {
-    let results = search_upstream(upstream, api_key, &query.query).await;
-    let response = crate::models::result::SearchResponse {
-        query: query.query.clone(),
-        results,
-        errors: Vec::new(),
+    let content = match req.send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(t) => serde_json::from_str::<serde_json::Value>(&t)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/choices/0/message/content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        },
+        Err(_) => String::new(),
     };
-    (StatusCode::OK, Json(response)).into_response()
+
+    parse_search_results(&content)
 }
 
 /// Parse search results from the model's text output.
