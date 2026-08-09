@@ -73,9 +73,14 @@ pub fn register_from_config(
     registry: &mut EngineRegistry,
     config_path: &std::path::Path,
     proxy_manager: Option<Arc<ProxyManager>>,
+    stackexchange_api_key: Option<&str>,
 ) {
     match load_engines_from_yaml(config_path) {
-        Ok(configs) => {
+        Ok(mut configs) => {
+            let key = stackexchange_api_key.unwrap_or("");
+            for config in &mut configs {
+                config.search_url = config.search_url.replace("{api_key}", key);
+            }
             for config in configs {
                 let engine = ConfigurableEngine::new(config, proxy_manager.clone());
                 registry.register(Arc::new(engine));
@@ -89,12 +94,13 @@ pub fn register_from_config(
 
 pub fn builtin_registry(
     proxy_manager: Option<Arc<ProxyManager>>,
+    stackexchange_api_key: Option<&str>,
 ) -> EngineRegistry {
     let mut registry = EngineRegistry::new();
 
     let config_path = std::path::Path::new("engines.yaml");
     if config_path.exists() {
-        register_from_config(&mut registry, config_path, proxy_manager);
+        register_from_config(&mut registry, config_path, proxy_manager, stackexchange_api_key);
     }
 
     registry

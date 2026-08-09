@@ -8,3 +8,7 @@ warmup_queries = []
 proxy_urls = []
 mcp_enabled = true
 mcp_path = "/mcp"
+
+# Stack Exchange API key. Raises rate limit from 300 to 10,000 req/day.
+# Get one at https://stackapps.com/apps/oauth/register
+# stackexchange_api_key = ""

@@ -48,6 +48,10 @@ pub struct Config {
     /// HTTP path for the MCP server endpoint.
     #[serde(default = "default_mcp_path")]
     pub mcp_path: String,
+
+    /// Stack Exchange API key. Raises rate limit from 300 to 10,000 req/day.
+    #[serde(default)]
+    pub stackexchange_api_key: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -105,6 +109,7 @@ impl Default for Config {
             upstream_api_key: default_upstream_api_key(),
             mcp_enabled: default_true(),
             mcp_path: default_mcp_path(),
+            stackexchange_api_key: None,
         }
     }
 }

@@ -468,3 +468,96 @@ fn parse_numbered_list(content: &str) -> Vec<crate::models::result::SearchResult
     }
     results
 }
+
+/// POST /v1/chat/completions — OpenAI-compatible endpoint that handles the
+/// `web_search` tool. When cc is configured with agent-search as its API URL,
+/// built-in web_search tool calls are served directly by the local search
+/// pipeline (no LLM proxying).
+pub async fn chat_completions(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let has_web_search = body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|tools| {
+            tools.iter().any(|t| {
+                t.get("type").and_then(|ty| ty.as_str()) == Some("web_search")
+            })
+        })
+        .unwrap_or(false);
+
+    if !has_web_search {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "only web_search tool is supported"})),
+        )
+            .into_response();
+    }
+
+    // Extract query from the last user message.
+    let query = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .and_then(|msgs| msgs.last())
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if query.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no user message"})),
+        )
+            .into_response();
+    }
+
+    let search_query = SearchQuery {
+        query: query.clone(),
+        ..Default::default()
+    };
+    let results = search_with_fallback(&state, &search_query).await;
+
+    // Format as a numbered list so the model can cite sources.
+    let content = if results.is_empty() {
+        "No search results found.".to_string()
+    } else {
+        results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                format!(
+                    "{}. **{}** — {}\n   {}",
+                    i + 1,
+                    r.title,
+                    r.url,
+                    if r.snippet.is_empty() { "" } else { &r.snippet }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let response = serde_json::json!({
+        "id": format!("chatcmpl-{}", rand::random::<u64>()),
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": body.get("model").and_then(|m| m.as_str()).unwrap_or("agent-search"),
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+    });
+
+    (StatusCode::OK, Json(response)).into_response()
+}

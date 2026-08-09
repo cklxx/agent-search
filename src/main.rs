@@ -13,7 +13,7 @@ use agent_search::engine::EngineSuspensionManager;
 use agent_search::index::LocalIndex;
 use agent_search::mcp::{mcp_messages, mcp_post, mcp_sse};
 use agent_search::ranking::get_strategy;
-use agent_search::routes::{AppState, fetch_content, health, list_engines, list_strategies, search, search_ab, search_stream, web_search};
+use agent_search::routes::{AppState, chat_completions, fetch_content, health, list_engines, list_strategies, search, search_ab, search_stream, web_search};
 
 fn main() -> anyhow::Result<()> {
     // Cross-encoder reranking runs on spawn_blocking (CPU-heavy, must not
@@ -44,7 +44,7 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::info!("starting agent-search on {}:{}", config.host, config.port);
 
     let proxy_manager = Arc::new(config.proxy_manager());
-    let registry = builtin_registry(Some(proxy_manager.clone()));
+    let registry = builtin_registry(Some(proxy_manager.clone()), config.stackexchange_api_key.as_deref());
     tracing::info!("registered engines: {:?}", registry.names());
 
     let cache = QueryCache::new(config.cache_size, Duration::from_secs(config.cache_ttl_secs));
@@ -92,6 +92,7 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/search/ab", post(search_ab))
         .route("/search/stream", post(search_stream))
         .route("/web_search", post(web_search))
+        .route("/v1/chat/completions", post(chat_completions))
         .route("/content", get(fetch_content));
 
     // MCP server (Streamable HTTP + legacy SSE transport).
