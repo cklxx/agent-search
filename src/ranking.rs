@@ -298,7 +298,7 @@ impl BgeRerankerStrategy {
 
     fn build_reranker() -> anyhow::Result<TextRerank> {
         let mut options = RerankInitOptions::default();
-        options.model_name = RerankerModel::BGERerankerV2M3;
+        options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
         TextRerank::try_new(options)
     }
 }
@@ -321,7 +321,10 @@ impl RankingStrategy for BgeRerankerStrategy {
         };
 
         let coverage = query_coverage(&document, query);
-        relevance * coverage * coverage
+        let authority = domain_authority(&raw.url);
+        // Mix ranking: authority has highest weight (squared), then relevance,
+        // then query coverage to anchor semantic relevance to query terms.
+        authority * authority * relevance * coverage
     }
 
     fn score_batch(
@@ -380,8 +383,11 @@ impl RankingStrategy for BgeRerankerStrategy {
             if let Ok(results) = reranker.rerank(query.query.as_str(), doc_refs, false, None) {
                 for (rank, r) in results.iter().enumerate() {
                     let orig_idx = top_indices[rank];
+                    let (raw, _, _) = &items[orig_idx];
                     let coverage = query_coverage(&documents[rank], query);
-                    scores[orig_idx] = r.score * coverage * coverage;
+                    let authority = domain_authority(&raw.url);
+                    // Mix ranking: authority² × relevance × coverage.
+                    scores[orig_idx] = authority * authority * r.score * coverage;
                 }
             }
 
