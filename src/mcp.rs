@@ -4,6 +4,8 @@
 //! Supports both the modern Streamable HTTP transport (POST returns JSON)
 //! and the legacy HTTP+SSE transport (GET /mcp/sse + POST /mcp/messages).
 
+use std::time::Duration;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response, Sse};
