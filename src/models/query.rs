@@ -302,5 +302,72 @@ pub fn infer_categories(query: &str) -> Vec<&'static str> {
         cats.push("news");
     }
 
+    // Movies / TV
+    if q.contains("movie")
+        || q.contains("film")
+        || q.contains("tv show")
+        || q.contains("tv series")
+        || q.contains("actor")
+        || q.contains("actress")
+        || q.contains("director")
+        || q.contains("imdb")
+        || q.contains("netflix")
+    {
+        cats.push("movies");
+    }
+
+    // Videos
+    if q.contains("video")
+        || q.contains("youtube")
+        || q.contains("vimeo")
+        || q.contains("dailymotion")
+        || q.contains("twitch")
+        || q.contains("stream")
+        || q.contains("tutorial")
+    {
+        cats.push("videos");
+    }
+
+    // Shopping
+    if q.contains("buy")
+        || q.contains("shop")
+        || q.contains("shopping")
+        || q.contains("price")
+        || q.contains("amazon")
+        || q.contains("ebay")
+        || q.contains("product")
+        || q.contains("review")
+    {
+        cats.push("shopping");
+    }
+
+    // Jobs
+    if q.contains("job")
+        || q.contains("jobs")
+        || q.contains("career")
+        || q.contains("salary")
+        || q.contains("resume")
+        || q.contains("interview")
+        || q.contains("hiring")
+        || q.contains("indeed")
+        || q.contains("glassdoor")
+    {
+        cats.push("jobs");
+    }
+
+    // Social media
+    if q.contains("social media")
+        || q.contains("twitter")
+        || q.contains("x.com")
+        || q.contains("facebook")
+        || q.contains("instagram")
+        || q.contains("linkedin")
+        || q.contains("pinterest")
+        || q.contains("tweet")
+        || q.contains("post")
+    {
+        cats.push("social media");
+    }
+
     cats
 }
