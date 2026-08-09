@@ -299,6 +299,8 @@ impl BgeRerankerStrategy {
     fn build_reranker() -> anyhow::Result<TextRerank> {
         let mut options = RerankInitOptions::default();
         options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
+        // Store model in ./models so it can be bundled with the release.
+        options.cache_dir = std::path::PathBuf::from("models");
         TextRerank::try_new(options)
     }
 }

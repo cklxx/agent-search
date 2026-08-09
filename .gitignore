@@ -6,3 +6,5 @@ config.local.toml
 /data/
 .fastembed_cache/
 release/
+models/
+agent-search-*.tar.gz
