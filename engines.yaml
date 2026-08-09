@@ -72,17 +72,6 @@
     url_prefix: https://crates.io/crates/
     title: name
     content: description
-- name: pypi
-  type: html
-  categories:
-  - packages
-  weight: 1.2
-  search_url: https://pypi.org/search/?q={query}
-  html:
-    results: .package-snippet
-    url: a.package-snippet__name
-    title: span.package-snippet__name
-    content: p.package-snippet__description
 - name: mdn
   type: json
   categories:
@@ -205,17 +194,6 @@
     url: a.u-url
     title: a.u-url
     content: .story_text
-- name: bitbucket
-  type: html
-  categories:
-  - repos
-  search_url: https://bitbucket.org/repo/all/{pageno}?name={query}
-  paging: true
-  html:
-    results: article.repo-summary
-    url: a.repo-link
-    title: a.repo-link
-    content: p
 - name: pubdev
   type: html
   categories:
@@ -224,20 +202,9 @@
   paging: true
   html:
     results: .packages-item
-    url: a.packages-title
-    title: a.packages-title
+    url: .packages-title a
+    title: .packages-title a
     content: .packages-description
-- name: anaconda
-  type: html
-  categories:
-  - packages
-  search_url: https://anaconda.org/search?q={query}&page={pageno}
-  paging: true
-  html:
-    results: .packageList li
-    url: a
-    title: a
-    content: span
 - name: google_scholar
   type: html
   categories:
@@ -309,17 +276,6 @@
     url: project_uri
     title: name
     content: info
-- name: sourcegraph
-  type: html
-  categories:
-  - it
-  - code
-  search_url: https://sourcegraph.com/search?q=context:global+{query}&patternType=literal
-  html:
-    results: .search-result
-    url: a
-    title: .search-result-title
-    content: .search-result-content
 - name: stackexchange
   type: json
   categories:
@@ -364,17 +320,6 @@
     url: url
     title: title
     content: description
-- name: hashnode
-  type: html
-  categories:
-  - blogs
-  - it
-  search_url: https://hashnode.com/search?q={query}
-  html:
-    results: .search-result
-    url: a
-    title: .search-result-title
-    content: .search-result-content
 - name: searxng
   type: json
   categories:
@@ -539,3 +484,177 @@
     url: .loop-card__title-link
     title: .loop-card__title-link
     content: .loop-card__cat
+- name: bilibili
+  type: json
+  categories:
+  - videos
+  - social media
+  search_url: https://api.bilibili.com/x/web-interface/search/all/v2?keyword={query}
+  json:
+    results: data/result
+    url: arcurl
+    title: title
+    content: description
+- name: tmdb
+  type: html
+  categories:
+  - movies
+  search_url: https://www.themoviedb.org/search?page={pageno}&query={query}
+  paging: true
+  html:
+    results: .search-result
+    url: a
+    title: h2
+    content: p
+- name: imdb
+  type: html
+  categories:
+  - movies
+  search_url: https://www.imdb.com/find?q={query}&s=tt
+  html:
+    results: .findResult
+    url: a
+    title: td.result_text a
+    content: td.result_text
+- name: rotten_tomatoes
+  type: html
+  categories:
+  - movies
+  search_url: https://www.rottentomatoes.com/search?search={query}
+  html:
+    results: .search-result
+    url: a
+    title: .search-result-title
+    content: .search-result-synopsis
+- name: youtube
+  type: html
+  categories:
+  - videos
+  search_url: https://www.youtube.com/results?search_query={query}
+  html:
+    results: .yt-lockup-video
+    url: a.yt-uix-tile-link
+    title: a.yt-uix-tile-link
+    content: .yt-lockup-description
+- name: vimeo
+  type: html
+  categories:
+  - videos
+  search_url: https://vimeo.com/search?q={query}
+  html:
+    results: .search_result
+    url: a
+    title: .search_result_title
+    content: .search_result_description
+- name: dailymotion
+  type: html
+  categories:
+  - videos
+  search_url: https://www.dailymotion.com/search/{query}
+  html:
+    results: .VideoCard
+    url: a
+    title: .VideoCard__title
+    content: .VideoCard__description
+- name: twitch
+  type: html
+  categories:
+  - videos
+  - games
+  search_url: https://www.twitch.tv/search?term={query}
+  html:
+    results: .search-result
+    url: a
+    title: .search-result-title
+    content: .search-result-description
+- name: ebay
+  type: html
+  categories:
+  - shopping
+  search_url: https://www.ebay.com/sch/i.html?_nkw={query}
+  html:
+    results: .s-item
+    url: a.s-item__link
+    title: .s-item__title
+    content: .s-item__price
+- name: amazon
+  type: html
+  categories:
+  - shopping
+  search_url: https://www.amazon.com/s?k={query}
+  html:
+    results: .s-result-item
+    url: a.a-link-normal
+    title: h2 a span
+    content: .a-price
+- name: indeed
+  type: html
+  categories:
+  - jobs
+  search_url: https://www.indeed.com/jobs?q={query}
+  html:
+    results: .jobsearch-SerpJobCard
+    url: a.jobtitle
+    title: a.jobtitle
+    content: .summary
+- name: glassdoor
+  type: html
+  categories:
+  - jobs
+  search_url: https://www.glassdoor.com/Job/jobs.htm?sc.keyword={query}
+  html:
+    results: .jobContainer
+    url: a.jobLink
+    title: a.jobLink
+    content: .jobDescription
+- name: pinterest
+  type: html
+  categories:
+  - social media
+  search_url: https://www.pinterest.com/search/pins/?q={query}
+  html:
+    results: .Grid__Item
+    url: a
+    title: h3
+    content: p
+- name: instagram
+  type: html
+  categories:
+  - social media
+  search_url: https://www.instagram.com/explore/tags/{query}/
+  html:
+    results: article
+    url: a
+    title: img
+    content: img
+- name: linkedin
+  type: html
+  categories:
+  - social media
+  search_url: https://www.linkedin.com/search/results/all/?keywords={query}
+  html:
+    results: .search-result
+    url: a
+    title: .search-result__title
+    content: .search-result__snippet
+- name: facebook
+  type: html
+  categories:
+  - social media
+  search_url: https://www.facebook.com/search/top/?q={query}
+  html:
+    results: ._6rbb
+    url: a
+    title: ._60ba
+    content: ._6rbb
+- name: twitter
+  type: html
+  categories:
+  - social media
+  - news
+  search_url: https://twitter.com/search?q={query}
+  html:
+    results: .tweet
+    url: a.tweet-timestamp
+    title: .fullname
+    content: .tweet-text
