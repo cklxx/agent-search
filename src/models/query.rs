@@ -133,6 +133,146 @@ pub fn infer_categories(query: &str) -> Vec<&'static str> {
         cats.push("it");
     }
 
+    // Programming (languages, code) — routes to stackoverflow, softwareengineering
+    if q.contains("rust")
+        || q.contains("python")
+        || q.contains("javascript")
+        || q.contains("typescript")
+        || q.contains("golang")
+        || q.contains("java")
+        || q.contains("c++")
+        || q.contains("cpp")
+        || q.contains("code")
+        || q.contains("programming")
+        || q.contains("function")
+        || q.contains("class")
+        || q.contains("variable")
+        || q.contains("compile")
+        || q.contains("bug")
+        || q.contains("error")
+    {
+        cats.push("programming");
+    }
+
+    // Security — routes to security_stackexchange
+    if q.contains("security")
+        || q.contains("exploit")
+        || q.contains("vulnerability")
+        || q.contains("cve")
+        || q.contains("malware")
+        || q.contains("ransomware")
+        || q.contains("penetration")
+        || q.contains("pentest")
+        || q.contains("firewall")
+        || q.contains("encryption")
+        || q.contains("cryptography")
+        || q.contains("authentication")
+        || q.contains("authorization")
+        || q.contains("oauth")
+        || q.contains("jwt")
+        || q.contains("injection")
+        || q.contains("xss")
+        || q.contains("csrf")
+    {
+        cats.push("security");
+    }
+
+    // Databases — routes to dba_stackexchange
+    if q.contains("database")
+        || q.contains("sql")
+        || q.contains("mysql")
+        || q.contains("postgresql")
+        || q.contains("postgres")
+        || q.contains("mongodb")
+        || q.contains("redis")
+        || q.contains("nosql")
+        || q.contains("orm")
+        || q.contains("transaction")
+        || q.contains("index")
+        || q.contains("query")
+    {
+        cats.push("databases");
+    }
+
+    // Linux / Unix — routes to askubuntu, unix_stackexchange
+    if q.contains("linux")
+        || q.contains("unix")
+        || q.contains("ubuntu")
+        || q.contains("debian")
+        || q.contains("kernel")
+        || q.contains("systemd")
+        || q.contains("bash")
+        || q.contains("shell")
+        || q.contains("command line")
+        || q.contains("terminal")
+    {
+        cats.push("linux");
+    }
+
+    // DevOps — routes to devops_stackexchange
+    if q.contains("docker")
+        || q.contains("kubernetes")
+        || q.contains("k8s")
+        || q.contains("devops")
+        || q.contains("ci/cd")
+        || q.contains("ci")
+        || q.contains("cd")
+        || q.contains("jenkins")
+        || q.contains("terraform")
+        || q.contains("ansible")
+        || q.contains("container")
+    {
+        cats.push("devops");
+    }
+
+    // Sysadmin — routes to serverfault
+    if q.contains("server")
+        || q.contains("nginx")
+        || q.contains("apache")
+        || q.contains("dns")
+        || q.contains("load balanc")
+        || q.contains("monitoring")
+        || q.contains("backup")
+        || q.contains("sysadmin")
+    {
+        cats.push("sysadmin");
+    }
+
+    // AI / LLM — routes to ai_stackexchange
+    if q.contains("ai")
+        || q.contains("llm")
+        || q.contains("gpt")
+        || q.contains("bert")
+        || q.contains("transformer")
+        || q.contains("neural")
+        || q.contains("deep learning")
+        || q.contains("machine learning")
+        || q.contains("reinforcement")
+        || q.contains("embedding")
+        || q.contains("diffusion")
+        || q.contains("tokeniz")
+        || q.contains("fine-tun")
+        || q.contains("pretrain")
+        || q.contains("attention")
+    {
+        cats.push("ai");
+    }
+
+    // Data science — routes to datascience_stackexchange
+    if q.contains("data science")
+        || q.contains("statistics")
+        || q.contains("machine learning")
+        || q.contains("deep learning")
+        || q.contains("pandas")
+        || q.contains("numpy")
+        || q.contains("scikit")
+        || q.contains("regression")
+        || q.contains("classification")
+        || q.contains("clustering")
+    {
+        cats.push("datascience");
+    }
+
     // Code repositories / packages
     if q.contains("github")
         || q.contains("git")

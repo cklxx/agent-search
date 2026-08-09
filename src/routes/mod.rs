@@ -584,3 +584,132 @@ pub async fn chat_completions(
 
     (StatusCode::OK, Json(response)).into_response()
 }
+
+/// POST /v1/messages — Anthropic-compatible endpoint.
+///
+/// Requests with the `web_search` tool: run local search, inject results
+/// into the user message, then forward to the upstream LLM relay without
+/// the web_search tool. All other requests are proxied transparently.
+pub async fn messages(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let has_web_search = body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|tools| {
+            tools.iter().any(|t| {
+                t.get("type").and_then(|ty| ty.as_str()) == Some("web_search")
+            })
+        })
+        .unwrap_or(false);
+
+    let upstream = match state.upstream_search_url.as_ref() {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "no upstream LLM configured"})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut body = body;
+
+    if has_web_search {
+        // Extract query from the last user message.
+        let query = body
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .and_then(|msgs| msgs.last())
+            .and_then(|m| m.get("content"))
+            .and_then(|c| match c {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .next()
+                    .map(|s| s.to_string()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        if !query.is_empty() {
+            let search_query = SearchQuery {
+                query: query.clone(),
+                ..Default::default()
+            };
+            let results = search_with_fallback(&state, &search_query).await;
+
+            // Format search results as context.
+            let search_context = if results.is_empty() {
+                String::new()
+            } else {
+                let formatted: Vec<String> = results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        format!(
+                            "[{}] {} — {}\n{}",
+                            i + 1,
+                            r.title,
+                            r.url,
+                            if r.snippet.is_empty() { "" } else { &r.snippet }
+                        )
+                    })
+                    .collect();
+                format!(
+                    "\n\n<search_results>\n{}\n</search_results>",
+                    formatted.join("\n\n")
+                )
+            };
+
+            // Inject search results into the last user message.
+            if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                if let Some(last) = msgs.last_mut() {
+                    if let Some(content) = last.get_mut("content") {
+                        match content {
+                            serde_json::Value::String(s) => {
+                                s.push_str(&search_context);
+                            }
+                            serde_json::Value::Array(arr) => {
+                                arr.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": search_context
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Remove web_search tool before forwarding.
+            if let Some(tools) = body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+                tools.retain(|t| t.get("type").and_then(|ty| ty.as_str()) != Some("web_search"));
+            }
+        }
+    }
+
+    // Forward to upstream LLM relay.
+    let url = format!("{}/v1/messages", upstream.trim_end_matches('/'));
+    let mut req = state.http_client.post(&url).json(&body);
+    if let Some(key) = state.upstream_api_key.as_deref() {
+        req = req.header("Authorization", format!("Bearer {}", key));
+        req = req.header("anthropic-version", "2023-06-01");
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            (status, text).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("upstream proxy failed: {}", e)})),
+        )
+            .into_response(),
+    }
+}

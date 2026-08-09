@@ -545,7 +545,6 @@
   type: json
   categories:
   - programming
-  - it
   - q&a
   weight: 1.8
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=stackoverflow&pagesize=10&key={api_key}
@@ -565,7 +564,6 @@
   type: json
   categories:
   - linux
-  - it
   - q&a
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=askubuntu&pagesize=10&key={api_key}
   json: *id001
@@ -1050,7 +1048,6 @@
   categories:
   - ai
   - science
-  - it
   - q&a
   weight: 1.5
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=ai&pagesize=10&key={api_key}
@@ -1059,7 +1056,6 @@
   type: json
   categories:
   - security
-  - it
   - q&a
   weight: 1.4
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=security&pagesize=10&key={api_key}
@@ -1068,7 +1064,6 @@
   type: json
   categories:
   - science
-  - it
   - q&a
   weight: 1.4
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=cs&pagesize=10&key={api_key}
@@ -1078,7 +1073,6 @@
   categories:
   - datascience
   - science
-  - it
   - q&a
   weight: 1.4
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=datascience&pagesize=10&key={api_key}
@@ -1087,7 +1081,6 @@
   type: json
   categories:
   - devops
-  - it
   - q&a
   weight: 1.3
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=devops&pagesize=10&key={api_key}
@@ -1096,7 +1089,6 @@
   type: json
   categories:
   - programming
-  - it
   - q&a
   weight: 1.4
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=softwareengineering&pagesize=10&key={api_key}
@@ -1105,7 +1097,6 @@
   type: json
   categories:
   - sysadmin
-  - it
   - q&a
   weight: 1.4
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=serverfault&pagesize=10&key={api_key}
@@ -1114,7 +1105,6 @@
   type: json
   categories:
   - databases
-  - it
   - q&a
   weight: 1.3
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=dba&pagesize=10&key={api_key}
@@ -1123,7 +1113,6 @@
   type: json
   categories:
   - linux
-  - it
   - q&a
   weight: 1.4
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=unix&pagesize=10&key={api_key}
@@ -1148,7 +1137,6 @@
   type: json
   categories:
   - science
-  - it
   - q&a
   weight: 1.2
   search_url: https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={query}&site=electronics&pagesize=10&key={api_key}
