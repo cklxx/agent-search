@@ -1,9 +1,13 @@
-//! Local Tantivy index for caching search results.
+//! Local Tantivy index.
+//!
+//! Two search modes:
+//! - `search_cached`: exact query-string match (cache for repeated queries).
+//! - `search_fulltext`: BM25 over title + content (self-built index from crawled pages).
 
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::TermQuery;
+use tantivy::query::{QueryParser, TermQuery};
 use tantivy::schema::{Field, Schema, STORED, STRING, TEXT, Value};
 use tantivy::{doc, Index, IndexWriter, Term, TantivyError};
 
@@ -17,6 +21,7 @@ pub struct LocalIndex {
     title_field: Field,
     url_field: Field,
     snippet_field: Field,
+    content_field: Field,
     score_field: Field,
     engine_field: Field,
 }
@@ -47,12 +52,13 @@ impl LocalIndex {
             title_field: fields.title,
             url_field: fields.url,
             snippet_field: fields.snippet,
+            content_field: fields.content,
             score_field: fields.score,
             engine_field: fields.engine,
         }
     }
 
-    /// Index results alongside the query that produced them.
+    /// Cache results alongside the query that produced them.
     pub fn cache_results(&self, query: &str, results: &[SearchResult]) -> Result<(), TantivyError> {
         let mut index_writer: IndexWriter = self.index.writer(50_000_000)?;
 
@@ -63,6 +69,7 @@ impl LocalIndex {
                 self.title_field => result.title.clone(),
                 self.url_field => result.url.clone(),
                 self.snippet_field => result.snippet.clone(),
+                self.content_field => result.snippet.clone(),
                 self.score_field => result.score as f64,
                 self.engine_field => engine,
             ))?;
@@ -72,9 +79,24 @@ impl LocalIndex {
         Ok(())
     }
 
+    /// Index a crawled page (title + full content) for full-text search.
+    pub fn index_page(&self, url: &str, title: &str, content: &str) -> Result<(), TantivyError> {
+        let mut index_writer: IndexWriter = self.index.writer(50_000_000)?;
+        index_writer.add_document(doc!(
+            self.query_field => String::new(),
+            self.title_field => title.to_string(),
+            self.url_field => url.to_string(),
+            self.snippet_field => content.chars().take(300).collect::<String>(),
+            self.content_field => content.to_string(),
+            self.score_field => 0.0,
+            self.engine_field => "local".to_string(),
+        ))?;
+        index_writer.commit()?;
+        Ok(())
+    }
+
     /// Returns cached results for the exact query. The query field is STRING
-    /// (untokenized), so a TermQuery does exact string matching: "rust" only
-    /// matches results cached for "rust", not "rust async".
+    /// (untokenized), so a TermQuery does exact string matching.
     pub fn search_cached(&self, query: &str) -> Option<Vec<SearchResult>> {
         let reader = self.index.reader().ok()?;
         let searcher = reader.searcher();
@@ -92,13 +114,35 @@ impl LocalIndex {
         Some(self.collect_results(&searcher, top_docs))
     }
 
+    /// Full-text BM25 search over title + content fields.
+    pub fn search_fulltext(&self, query: &str, limit: usize) -> Option<Vec<SearchResult>> {
+        let reader = self.index.reader().ok()?;
+        let searcher = reader.searcher();
+
+        let query_parser = QueryParser::for_index(
+            &self.index,
+            vec![self.title_field, self.content_field],
+        );
+        let parsed_query = query_parser.parse_query(query).ok()?;
+
+        let top_docs = searcher
+            .search(&parsed_query, &TopDocs::with_limit(limit))
+            .ok()?;
+
+        if top_docs.is_empty() {
+            return None;
+        }
+
+        Some(self.collect_results(&searcher, top_docs))
+    }
+
     fn collect_results(
         &self,
         searcher: &tantivy::Searcher,
         top_docs: Vec<(f32, tantivy::DocAddress)>,
     ) -> Vec<SearchResult> {
         let mut results = Vec::with_capacity(top_docs.len());
-        for (_score, doc_address) in top_docs {
+        for (score, doc_address) in top_docs {
             let retrieved_doc = match searcher.doc(doc_address) {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -107,10 +151,6 @@ impl LocalIndex {
             let url = field_str(&retrieved_doc, self.url_field);
             let snippet = field_str(&retrieved_doc, self.snippet_field);
             let engine = field_str(&retrieved_doc, self.engine_field);
-            let score = retrieved_doc
-                .get_first(self.score_field)
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0) as f32;
 
             results.push(SearchResult {
                 title,
@@ -130,22 +170,23 @@ struct IndexFields {
     title: Field,
     url: Field,
     snippet: Field,
+    content: Field,
     score: Field,
     engine: Field,
 }
 
 fn build_schema() -> (Schema, IndexFields) {
     let mut schema_builder = Schema::builder();
-    // STRING (not tokenized) so exact query matching works: "rust" must not
-    // match results cached for "rust async".
+    // STRING (not tokenized) so exact query matching works.
     let query = schema_builder.add_text_field("query", STRING | STORED);
     let title = schema_builder.add_text_field("title", TEXT | STORED);
     let url = schema_builder.add_text_field("url", TEXT | STORED);
     let snippet = schema_builder.add_text_field("snippet", TEXT | STORED);
+    let content = schema_builder.add_text_field("content", TEXT | STORED);
     let score = schema_builder.add_f64_field("score", STORED);
     let engine = schema_builder.add_text_field("engine", TEXT | STORED);
     let schema = schema_builder.build();
-    (schema, IndexFields { query, title, url, snippet, score, engine })
+    (schema, IndexFields { query, title, url, snippet, content, score, engine })
 }
 
 fn field_str(doc: &tantivy::schema::TantivyDocument, field: Field) -> String {

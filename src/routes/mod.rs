@@ -71,6 +71,7 @@ pub async fn search(
         return (StatusCode::OK, Json((*cached).clone())).into_response();
     }
 
+    // Exact query cache (same query string).
     if let Some(mut local_results) = state.local_index.search_cached(&query.query) {
         local_results.truncate(query.max_results);
         let response = crate::models::result::SearchResponse {
@@ -83,7 +84,26 @@ pub async fn search(
         return (StatusCode::OK, Json((*response).clone())).into_response();
     }
 
+    // Full-text index (crawled pages). Return early if we have enough hits.
+    if let Some(mut ft_results) = state.local_index.search_fulltext(&query.query, query.max_results) {
+        if ft_results.len() >= 3 {
+            ft_results.truncate(query.max_results);
+            let response = crate::models::result::SearchResponse {
+                query: query.query.clone(),
+                results: ft_results,
+                errors: Vec::new(),
+            };
+            let response = Arc::new(response);
+            state.cache.insert(key, response.clone()).await;
+            return (StatusCode::OK, Json((*response).clone())).into_response();
+        }
+    }
+
     let results = search_with_fallback(&state, &query).await;
+
+    // Async-crawl the top results to build the local full-text index.
+    crawl_result_pages(&state, &results).await;
+
     let response = crate::models::result::SearchResponse {
         query: query.query.clone(),
         results,
@@ -93,6 +113,33 @@ pub async fn search(
     let response = Arc::new(response);
     state.cache.insert(key, response.clone()).await;
     (StatusCode::OK, Json((*response).clone())).into_response()
+}
+
+/// Crawl the top N result URLs and index their content for future full-text searches.
+async fn crawl_result_pages(state: &AppState, results: &[crate::models::result::SearchResult]) {
+    let state = state.clone();
+    let urls: Vec<String> = results
+        .iter()
+        .take(5)
+        .map(|r| r.url.clone())
+        .filter(|u| u.starts_with("http"))
+        .collect();
+
+    tokio::spawn(async move {
+        for url in urls {
+            match crate::crawler::fetch_and_extract(&state.http_client, &url).await {
+                Ok((title, content)) => {
+                    if !content.is_empty() {
+                        let _ = state.local_index.index_page(&url, &title, &content);
+                        tracing::debug!(url = %url, len = content.len(), "crawled and indexed page");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(url = %url, error = %e, "crawl failed");
+                }
+            }
+        }
+    });
 }
 
 /// POST /search/ab — run two strategies side-by-side.
@@ -317,6 +364,39 @@ pub async fn fetch_content(
             })),
         )
             .into_response(),
+        Err(e) => ApiError::new(ErrorCode::UpstreamError, e.to_string()).into_response(),
+    }
+}
+
+/// POST /crawl — fetch a URL, extract main content, and index it for full-text search.
+pub async fn crawl_url(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let url = match body.get("url").and_then(|v| v.as_str()) {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => {
+            return ApiError::new(ErrorCode::ValidationError, "url is required")
+                .with_param("url", "https://example.com")
+                .into_response();
+        }
+    };
+
+    match crate::crawler::fetch_and_extract(&state.http_client, &url).await {
+        Ok((title, content)) => {
+            let len = content.len();
+            let _ = state.local_index.index_page(&url, &title, &content);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "url": url,
+                    "title": title,
+                    "content_length": len,
+                    "indexed": true,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => ApiError::new(ErrorCode::UpstreamError, e.to_string()).into_response(),
     }
 }

@@ -18,7 +18,7 @@ use agent_search::engine::EngineSuspensionManager;
 use agent_search::index::LocalIndex;
 use agent_search::mcp::{mcp_messages, mcp_post, mcp_sse};
 use agent_search::ranking::get_strategy;
-use agent_search::routes::{AppState, chat_completions, fetch_content, health, list_engines, list_strategies, messages, search, search_ab, search_stream, web_search};
+use agent_search::routes::{AppState, chat_completions, crawl_url, fetch_content, health, list_engines, list_strategies, messages, search, search_ab, search_stream, web_search};
 
 fn main() -> anyhow::Result<()> {
     // Cross-encoder reranking runs on spawn_blocking (CPU-heavy, must not
@@ -71,6 +71,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     let http_client = reqwest::Client::builder()
         .timeout(request_timeout)
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build()
         .unwrap_or_default();
 
@@ -99,7 +100,8 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/web_search", post(web_search))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
-        .route("/content", get(fetch_content));
+        .route("/content", get(fetch_content))
+        .route("/crawl", post(crawl_url));
 
     // MCP server (Streamable HTTP + legacy SSE transport).
     let app = if config.mcp_enabled {

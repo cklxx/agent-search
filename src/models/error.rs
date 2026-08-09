@@ -167,6 +167,22 @@ impl From<SearchError> for ApiError {
     }
 }
 
+/// Map axum's JSON rejection (malformed body, wrong type, etc.) to RFC 9457.
+impl From<axum::extract::rejection::JsonRejection> for ApiError {
+    fn from(rejection: axum::extract::rejection::JsonRejection) -> Self {
+        use axum::extract::rejection::JsonRejection::*;
+        match rejection {
+            JsonDataError(e) => ApiError::new(ErrorCode::ValidationError, e.to_string())
+                .with_param("body", "request body failed to deserialize"),
+            JsonSyntaxError(e) => ApiError::new(ErrorCode::ValidationError, e.to_string())
+                .with_param("body", "request body is not valid JSON"),
+            MissingJsonContentType => ApiError::new(ErrorCode::ValidationError, "missing Content-Type: application/json header")
+                .with_param("Content-Type", "must be application/json"),
+            _ => ApiError::new(ErrorCode::ValidationError, rejection.to_string()),
+        }
+    }
+}
+
 /// Structured error for MCP tool failures (returned with `isError: true`).
 #[derive(Debug, serde::Serialize)]
 pub struct ToolError {
