@@ -108,6 +108,13 @@ pub fn normalize_url(raw: &str) -> String {
     let host = parsed.host_str().unwrap_or("").to_lowercase();
     let mut path = parsed.path().to_string();
 
+    // Wikipedia treats spaces and underscores equivalently in article paths.
+    // Normalize spaces to underscores so "Rust (programming language)" and
+    // "Rust_(programming_language)" resolve to the same key.
+    if host.contains("wikipedia.org") {
+        path = path.replace(' ', "_");
+    }
+
     // Remove trailing slash (but keep root "/")
     if path.len() > 1 && path.ends_with('/') {
         path.pop();

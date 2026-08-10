@@ -9,13 +9,152 @@ use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{QueryParser, TermQuery};
 use tantivy::schema::{Field, Schema, STORED, STRING, TEXT, TextOptions, TextFieldIndexing, IndexRecordOption, Value};
-use tantivy::tokenizer::{NgramTokenizer, TextAnalyzer};
+use tantivy::tokenizer::{TextAnalyzer, Token, TokenStream, Tokenizer};
 use tantivy::{doc, Index, IndexWriter, Term, TantivyError};
 
 use crate::dedup::{DedupService, normalize_url};
 use crate::models::result::SearchResult;
 
 const DEFAULT_SEARCH_LIMIT: usize = 20;
+
+/// True if `c` is a CJK ideograph or punctuation that needs n-gram tokenization.
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c,
+        '\u{4e00}'..='\u{9fff}'      // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4dbf}'    // CJK Extension A
+        | '\u{20000}'..='\u{2a6df}'  // CJK Extension B
+        | '\u{2a700}'..='\u{2b73f}'  // CJK Extension C/D
+        | '\u{3000}'..='\u{303f}'    // CJK Symbols and Punctuation
+        | '\u{ff00}'..='\u{ffef}'    // Halfwidth and Fullwidth Forms
+        | '\u{3040}'..='\u{30ff}'    // Hiragana + Katakana
+        | '\u{ac00}'..='\u{d7af}'    // Hangul Syllables
+    )
+}
+
+/// Mixed tokenizer: ASCII words are kept whole; CJK runs are split into
+/// 2-character grams. This avoids the 2-gram explosion that makes English
+/// queries match almost any document (common bigrams like "re", "he", "on").
+#[derive(Clone)]
+struct MixedCjkTokenizer;
+
+impl Tokenizer for MixedCjkTokenizer {
+    type TokenStream<'a> = MixedCjkTokenStream<'a>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        MixedCjkTokenStream {
+            text,
+            tokens: Vec::new(),
+            index: 0,
+            built: false,
+        }
+    }
+}
+
+struct MixedCjkTokenStream<'a> {
+    text: &'a str,
+    tokens: Vec<Token>,
+    index: usize,
+    built: bool,
+}
+
+impl<'a> MixedCjkTokenStream<'a> {
+    fn build(&mut self) {
+        let bytes = self.text.as_bytes();
+        let mut position = 0;
+        let mut char_iter = self.text.char_indices().peekable();
+
+        while let Some(&(byte_start, c)) = char_iter.peek() {
+            if c.is_ascii_alphanumeric() {
+                // ASCII word: consume consecutive alphanumeric chars.
+                let start = byte_start;
+                while let Some(&(_, ch)) = char_iter.peek() {
+                    if ch.is_ascii_alphanumeric() {
+                        char_iter.next();
+                    } else {
+                        break;
+                    }
+                }
+                let end = match char_iter.peek() {
+                    Some(&(b, _)) => b,
+                    None => bytes.len(),
+                };
+                let word = &self.text[start..end];
+                self.tokens.push(Token {
+                    offset_from: start,
+                    offset_to: end,
+                    position,
+                    text: word.to_lowercase(),
+                    position_length: 1,
+                });
+                position += 1;
+            } else if is_cjk(c) {
+                // CJK run: collect consecutive CJK chars, emit 2-grams.
+                let mut run: Vec<(usize, char)> = Vec::new();
+                while let Some(&(_, ch)) = char_iter.peek() {
+                    if is_cjk(ch) {
+                        run.push(char_iter.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                if run.len() == 1 {
+                    let (idx, ch) = run[0];
+                    let end = idx + ch.len_utf8();
+                    self.tokens.push(Token {
+                        offset_from: idx,
+                        offset_to: end,
+                        position,
+                        text: ch.to_string(),
+                        position_length: 1,
+                    });
+                    position += 1;
+                } else {
+                    for w in run.windows(2) {
+                        let (start_idx, _) = w[0];
+                        let (end_idx, end_ch) = w[1];
+                        let end = end_idx + end_ch.len_utf8();
+                        let gram: String = w.iter().map(|(_, c)| c).collect();
+                        self.tokens.push(Token {
+                            offset_from: start_idx,
+                            offset_to: end,
+                            position,
+                            text: gram,
+                            position_length: 1,
+                        });
+                        position += 1;
+                    }
+                }
+            } else {
+                // Whitespace / punctuation: skip.
+                char_iter.next();
+            }
+        }
+        self.built = true;
+    }
+}
+
+impl<'a> TokenStream for MixedCjkTokenStream<'a> {
+    fn advance(&mut self) -> bool {
+        if !self.built {
+            self.build();
+        }
+        if self.index < self.tokens.len() {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn token(&self) -> &Token {
+        &self.tokens[self.index - 1]
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.tokens[self.index - 1]
+    }
+}
 
 pub struct LocalIndex {
     index: Index,
@@ -48,9 +187,8 @@ impl LocalIndex {
     }
 
     fn from_parts(index: Index, fields: IndexFields) -> Self {
-        // Register the CJK n-gram tokenizer (2-gram) for title/snippet/content.
-        let ngram = NgramTokenizer::all_ngrams(2, 2).expect("2-gram tokenizer params are valid");
-        let tokenizer = TextAnalyzer::from(ngram);
+        // Mixed tokenizer: ASCII words kept whole, CJK runs split into 2-grams.
+        let tokenizer = TextAnalyzer::from(MixedCjkTokenizer);
         index.tokenizers().register("cjk_ngram", tokenizer);
 
         Self {
@@ -131,10 +269,14 @@ impl LocalIndex {
         let reader = self.index.reader().ok()?;
         let searcher = reader.searcher();
 
-        let query_parser = QueryParser::for_index(
+        let mut query_parser = QueryParser::for_index(
             &self.index,
             vec![self.title_field, self.content_field],
         );
+        // AND: all query terms must match. Default OR makes 2-gram queries
+        // match any document sharing a single bigram (e.g. "python" in a
+        // 3D-printing answer).
+        query_parser.set_conjunction_by_default();
         let parsed_query = query_parser.parse_query(query).ok()?;
 
         let top_docs = searcher
@@ -191,6 +333,7 @@ impl LocalIndex {
                 published_date: None,
                 score,
                 engines: vec![engine],
+                weight: 1.0,
             });
         }
         results

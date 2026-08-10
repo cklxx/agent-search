@@ -12,11 +12,12 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::aggregator;
 use crate::cache::{QueryCache, cache_key};
-use crate::dedup::DedupService;
+use crate::dedup::{DedupService, normalize_url};
 use crate::engine::{DomainRateLimiter, EngineRegistry, EngineSuspensionManager};
 use crate::index::LocalIndex;
 use crate::models::error::{ApiError, ErrorCode};
 use crate::models::query::SearchQuery;
+use crate::models::result::RawSearchResult;
 use crate::ranking::{RankingStrategy, get_strategy, strategy_names};
 
 #[derive(Clone)]
@@ -100,53 +101,71 @@ pub async fn search(
     }
     tracing::debug!(cache = "query", hit = false, "cache miss");
 
-    // Exact query cache (same query string).
-    if let Some(mut local_results) = state.local_index.search_cached(&query.query) {
-        tracing::debug!(cache = "exact_index", hit = true, count = local_results.len());
-        local_results.truncate(query.max_results);
-        let response = crate::models::result::SearchResponse {
-            query: query.query.clone(),
-            results: local_results,
-            errors: Vec::new(),
-        };
-        let response = Arc::new(response);
-        state.cache.insert(key, response.clone()).await;
-        return (StatusCode::OK, Json((*response).clone())).into_response();
-    }
-    tracing::debug!(cache = "exact_index", hit = false);
+    // Local full-text results (crawled/indexed pages).
+    let local_results = state
+        .local_index
+        .search_fulltext(&query.query, query.max_results * 2)
+        .unwrap_or_default();
 
-    // Full-text index (crawled pages). Return early if we have enough hits.
-    if let Some(mut ft_results) = state.local_index.search_fulltext(&query.query, query.max_results) {
-        if ft_results.len() >= 3 {
-            tracing::debug!(cache = "fulltext", hit = true, count = ft_results.len());
-            ft_results.truncate(query.max_results);
-            let response = crate::models::result::SearchResponse {
-                query: query.query.clone(),
-                results: ft_results,
-                errors: Vec::new(),
-            };
-            let response = Arc::new(response);
-            state.cache.insert(key, response.clone()).await;
-            return (StatusCode::OK, Json((*response).clone())).into_response();
+    // Upstream results (external engines).
+    let upstream_response = search_with_fallback(&state, &query).await;
+
+    // Merge local + upstream, dedup by normalized URL, score uniformly with
+    // the active ranking strategy so local and upstream results are comparable.
+    let mut dedup_map: std::collections::HashMap<String, (RawSearchResult, Vec<String>, f32)> =
+        std::collections::HashMap::new();
+
+    for r in &local_results {
+        let key = normalize_url(&r.url);
+        let raw = RawSearchResult {
+            title: r.title.clone(),
+            url: r.url.clone(),
+            snippet: r.snippet.clone(),
+            published_date: r.published_date,
+            position: 1,
+        };
+        dedup_map.insert(key, (raw, r.engines.clone(), r.weight));
+    }
+
+    for r in &upstream_response.results {
+        let key = normalize_url(&r.url);
+        let entry = dedup_map.entry(key).or_insert_with(|| {
+            (
+                RawSearchResult {
+                    title: r.title.clone(),
+                    url: r.url.clone(),
+                    snippet: r.snippet.clone(),
+                    published_date: r.published_date,
+                    position: 1,
+                },
+                Vec::new(),
+                r.weight,
+            )
+        });
+        entry.2 = entry.2.max(r.weight);
+        for e in &r.engines {
+            if !entry.1.contains(e) {
+                entry.1.push(e.clone());
+            }
         }
     }
-    tracing::debug!(cache = "fulltext", hit = false);
 
-    let response = search_with_fallback(&state, &query).await;
+    let mut results = aggregator::score_results(dedup_map, &query, state.strategy.as_ref());
 
-    // Async-crawl the top results to build the local full-text index.
-    crawl_result_pages(&state, &response.results).await;
+    crawl_result_pages(&state, &results).await;
+    let _ = state.local_index.cache_results(&query.query, &results);
 
-    let _ = state.local_index.cache_results(&query.query, &response.results);
-
-    // Only cache non-empty results. Empty results (all engines failed) should
-    // not be cached so the next request can retry engines that may have recovered.
-    if !response.results.is_empty() {
+    if !results.is_empty() {
+        results.truncate(query.max_results);
+        let response = crate::models::result::SearchResponse {
+            query: query.query.clone(),
+            results,
+            errors: upstream_response.errors,
+        };
         let response = Arc::new(response);
         state.cache.insert(key, response.clone()).await;
         (StatusCode::OK, Json((*response).clone())).into_response()
     } else {
-        // All engines failed or timed out. Return 502 with error details.
         let api_error = ApiError::new(ErrorCode::UpstreamError, "all engines failed or timed out");
         (StatusCode::BAD_GATEWAY, Json(api_error)).into_response()
     }
@@ -441,6 +460,45 @@ pub async fn crawl_url(
     }
 }
 
+/// POST /index — directly index a page with pre-extracted title and content.
+/// Used for bulk-importing data (e.g. from HuggingFace datasets) without crawling.
+pub async fn index_page(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let url = match body.get("url").and_then(|v| v.as_str()) {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => {
+            return ApiError::new(ErrorCode::ValidationError, "url is required")
+                .with_param("url", "https://example.com")
+                .into_response();
+        }
+    };
+    let title = body.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    if content.is_empty() {
+        return ApiError::new(ErrorCode::ValidationError, "content is required")
+            .with_param("content", "page text content")
+            .into_response();
+    }
+
+    let len = content.len();
+    match state.local_index.index_page(&url, &title, &content, &state.dedup) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "url": url,
+                "title": title,
+                "content_length": len,
+                "indexed": true,
+            })),
+        )
+            .into_response(),
+        Err(e) => ApiError::new(ErrorCode::InternalError, e.to_string()).into_response(),
+    }
+}
+
 /// Call the upstream LLM relay's web_search tool and return parsed results.
 pub async fn search_upstream(
     client: &reqwest::Client,
@@ -537,6 +595,7 @@ fn parse_json_results(content: &str) -> Option<Vec<crate::models::result::Search
                 published_date: None,
                 score: 0.0,
                 engines: vec!["upstream".to_string()],
+                weight: 1.0,
             })
         })
         .collect();
@@ -577,6 +636,7 @@ fn parse_numbered_list(content: &str) -> Vec<crate::models::result::SearchResult
                     published_date: None,
                     score: 0.0,
                     engines: vec!["upstream".to_string()],
+                    weight: 1.0,
                 });
             }
         }

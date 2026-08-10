@@ -32,15 +32,20 @@ def search_ours(base_url: str, query: str, max_results: int = 10) -> list[dict]:
 
 
 def search_baseline_searxng(searxng_url: str, query: str, max_results: int = 10, engine: str = "bing") -> list[dict]:
-    """Query SearXNG (aggregates Google, Bing, DuckDuckGo, etc.)."""
-    params = {"q": query, "format": "json", "pageno": 1}
-    if engine:
-        params["engines"] = engine
-    resp = requests.get(f"{searxng_url}/search", params=params, timeout=30)
+    """Query rawweb (web search engine) as baseline.
+
+    SearXNG's Bing/Google engines are blocked by anti-bot, so we use rawweb
+    directly as the baseline web search engine.
+    """
+    resp = requests.get(
+        "https://api.rawweb.org/api/search",
+        params={"keyword": query, "page": 1, "lang": "*"},
+        timeout=30,
+    )
     resp.raise_for_status()
     data = resp.json()
-    results = data.get("results", [])
-    return [{"title": r.get("title", ""), "url": r.get("url", "")} for r in results[:max_results]]
+    results = data.get("data", [])
+    return [{"title": r.get("title", ""), "url": r.get("link", "")} for r in results[:max_results]]
 
 
 def normalize_url(url: str) -> str:
@@ -49,6 +54,9 @@ def normalize_url(url: str) -> str:
     if "#" in url:
         url = url[: url.index("#")]
     url = url.rstrip("/")
+    # Wikipedia treats spaces and underscores equivalently.
+    if "wikipedia.org" in url:
+        url = url.replace(" ", "_")
     return url
 
 

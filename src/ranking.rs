@@ -30,15 +30,15 @@ fn domain_authority(url: &str) -> f32 {
         ("nature.com", 1.4),
         ("science.org", 1.4),
         // Programming / systems
-        ("stackoverflow.com", 1.5),
-        ("serverfault.com", 1.4),
-        ("superuser.com", 1.4),
-        ("github.com", 1.4),
-        ("gitlab.com", 1.3),
-        ("developer.mozilla.org", 1.4),
-        ("docs.rs", 1.4),
-        ("doc.rust-lang.org", 1.4),
-        ("rust-lang.org", 1.4),
+        ("stackoverflow.com", 1.4),
+        ("serverfault.com", 1.3),
+        ("superuser.com", 1.3),
+        ("github.com", 0.7),
+        ("gitlab.com", 0.6),
+        ("developer.mozilla.org", 1.3),
+        ("docs.rs", 1.3),
+        ("doc.rust-lang.org", 1.3),
+        ("rust-lang.org", 1.3),
         ("python.org", 1.3),
         ("go.dev", 1.3),
         ("golang.org", 1.3),
@@ -53,14 +53,14 @@ fn domain_authority(url: &str) -> f32 {
         ("mysql.com", 1.3),
         ("learn.microsoft.com", 1.3),
         // General knowledge
-        ("wikipedia.org", 1.3),
+        ("wikipedia.org", 1.0),
         // LLM / AI
         ("huggingface.co", 1.4),
         ("openai.com", 1.3),
         ("anthropic.com", 1.3),
         // Low-quality mirrors / snapshots — downrank
-        ("archive.org", 0.5),
-        ("web.archive.org", 0.5),
+        ("archive.org", 0.01),
+        ("web.archive.org", 0.01),
     ];
 
     // Known content-farm / spam domains — hard downrank.
@@ -77,7 +77,10 @@ fn domain_authority(url: &str) -> f32 {
         .iter()
         .filter(|(d, _)| domain_matches(&domain, d))
         .map(|(_, v)| *v)
-        .fold(1.0_f32, f32::max);
+        .fold(0.0_f32, f32::max);
+
+    // No match in the authority table: default to 1.0 (neutral).
+    let authority = if authority == 0.0 { 1.0 } else { authority };
 
     // If not in the authority table, check spam/TLD heuristics.
     if authority == 1.0 {
@@ -367,12 +370,13 @@ impl BgeRerankerStrategy {
     pub fn new() -> anyhow::Result<Self> {
         // Pool size and intra_threads are tuned so total onnx threads ≈ CPU
         // cores: pool_size * intra_threads ≈ cores. Each instance uses 2
-        // threads for intra-op parallelism; pool size is half the core count.
+        // threads for intra-op parallelism; pool size is capped at 2 to keep
+        // memory usage bounded (~2.8GB for 2 instances of jina-reranker-v2).
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
         let intra_threads = 2;
-        let pool_size = (cores / intra_threads).clamp(1, 8);
+        let pool_size = (cores / intra_threads).clamp(1, 2);
         let mut pool = Vec::with_capacity(pool_size);
         let mut call_counts = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
@@ -420,9 +424,15 @@ impl RankingStrategy for BgeRerankerStrategy {
         const TOP_N: usize = 50;
         const REBUILD_EVERY: u64 = 50;
 
+        // Coarse rank with the full BM25 score (text relevance × position ×
+        // engine weight × domain authority × freshness). Using only raw BM25
+        // text match would let high-volume engines (e.g. GitHub) crowd out
+        // authoritative sources (python.org, docs.rs) from the top-N rerank
+        // pool, since those often have shorter, less keyword-dense titles.
+        let bm25 = Bm25Strategy;
         let bm25_scores: Vec<f32> = items
             .iter()
-            .map(|(raw, _, _)| bm25_score(raw, query))
+            .map(|(raw, engines, weight)| bm25.score(raw, query, *weight, engines))
             .collect();
 
         let mut indices: Vec<usize> = (0..items.len()).collect();

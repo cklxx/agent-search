@@ -204,13 +204,14 @@ pub fn score_results(
     let mut results: Vec<SearchResult> = items
         .into_iter()
         .zip(scores)
-        .map(|((raw, engines, _weight), score)| SearchResult {
+        .map(|((raw, engines, weight), score)| SearchResult {
             title: raw.title,
             url: raw.url,
             snippet: raw.snippet,
             published_date: raw.published_date,
             score,
             engines,
+            weight,
         })
         .collect();
 

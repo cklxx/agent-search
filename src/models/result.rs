@@ -17,6 +17,12 @@ pub struct SearchResult {
 
     /// All engines that returned this result (after dedup merge).
     pub engines: Vec<String>,
+
+    /// Max engine weight across all engines that returned this result.
+    /// Used when merging local + upstream results so high-weight engines
+    /// are not drowned out by local full-text matches.
+    #[serde(skip)]
+    pub weight: f32,
 }
 
 /// Raw result as returned by an engine (before scoring/merging).

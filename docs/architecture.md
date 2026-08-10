@@ -13,21 +13,15 @@
                │ miss
                ▼
 ┌─────────────────────────────────────────────┐
-│ 2. 本地精确查询缓存 (search_cached)           │
-│    Tantivy STRING 字段精确匹配 query          │
-└──────────────┬──────────────────────────────┘
-               │ miss
-               ▼
-┌─────────────────────────────────────────────┐
-│ 3. 本地全文索引 (search_fulltext)            │
+│ 2. 本地全文索引 (search_fulltext)            │
 │    Tantivy BM25 over title + content         │
-│    CJK 2-gram 分词                            │
-│    命中 ≥3 条则直接返回                        │
+│    混合分词: ASCII 按词, CJK 2-gram           │
+│    AND 查询 (所有词必须匹配)                  │
 └──────────────┬──────────────────────────────┘
-               │ miss
+               │
                ▼
 ┌─────────────────────────────────────────────┐
-│ 4. 召回 (Recall)                             │
+│ 3. 召回 (Recall)                             │
 │    ┌──────────────────────────────────────┐  │
 │    │ 外部引擎聚合 (fetch_raw_results)      │  │
 │    │  - SearXNG (general)                 │  │
@@ -39,28 +33,18 @@
                │
                ▼
 ┌─────────────────────────────────────────────┐
-│ 5. 去重 (DedupService)                       │
-│    normalize_url: 小写 host / 去跟踪参数 /    │
-│    去尾斜杠 / 解包 archive 快照               │
+│ 4. 合并 + 去重                               │
+│    本地全文结果 ⊕ 外部引擎结果                │
+│    normalize_url 去重 (小写 host / 去跟踪参数 │
+│    / 去尾斜杠 / 解包 archive 快照)            │
 └──────────────┬──────────────────────────────┘
                │
                ▼
 ┌─────────────────────────────────────────────┐
-│ 6. 粗排 (Coarse Ranking)                     │
-│    BM25F (title×3 + url×1.5 + snippet×1)    │
-│    × 位置衰减 (1/log2(pos+1))                │
-│    × 引擎权重                                │
-│    × 域名权威度 (白名单/黑名单)               │
-│    × 时效性 (exp(-age/180d))                 │
-└──────────────┬──────────────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────────────┐
-│ 7. 精排 (Fine Ranking)                       │
-│    bge_reranker (jina-reranker-v2)           │
-│    cross-encoder, 512 tokens                 │
-│    取粗排 top-50 送入精排                     │
-│    score = authority² × relevance × coverage │
+│ 5. 统一打分 (RankingStrategy)                │
+│    粗排 BM25F (title×3 + url×1.5 + snippet×1)│
+│    × 位置衰减 × 引擎权重 × 域名权威度 × 时效性│
+│    精排 bge_reranker (top-50 cross-encoder)  │
 └──────────────┬──────────────────────────────┘
                │
                ▼
@@ -93,8 +77,8 @@
 ┌─────────────────────────────────────────────┐
 │ 建库 (LocalIndex::index_page)                │
 │    Tantivy 索引                              │
-│    - title: CJK 2-gram TEXT                  │
-│    - content: CJK 2-gram TEXT                │
+│    - title: 混合分词 TEXT (ASCII 词 + CJK 2-gram) │
+│    - content: 混合分词 TEXT                  │
 │    - url: TEXT STORED                        │
 │    - engine: "local"                         │
 └─────────────────────────────────────────────┘
