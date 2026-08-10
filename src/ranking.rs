@@ -396,9 +396,9 @@ impl BgeRerankerStrategy {
         options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
         options.cache_dir = std::path::PathBuf::from("models");
         options.intra_threads = Some(intra_threads);
-        // 256 tokens keeps reranking fast on CPU while still capturing
-        // the most relevant content from titles and snippets.
-        options.max_length = 256;
+        // 512 tokens matches the model's max position embeddings and gives
+        // the cross-encoder fuller context from titles + snippets.
+        options.max_length = 512;
         TextRerank::try_new(options)
     }
 }
@@ -456,7 +456,7 @@ impl RankingStrategy for BgeRerankerStrategy {
                 // Truncate to 1024 chars. max_length=256 tokens (~1000 chars),
                 // so passing more text gives the cross-encoder fuller context
                 // without exceeding the model's token limit.
-                if let Some((idx, _)) = doc.char_indices().nth(1024) {
+                if let Some((idx, _)) = doc.char_indices().nth(2048) {
                     doc.truncate(idx);
                 }
                 doc
