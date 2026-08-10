@@ -453,8 +453,10 @@ impl RankingStrategy for BgeRerankerStrategy {
             .map(|&i| {
                 let (raw, _, _) = &items[i];
                 let mut doc = format!("{} {} {}", raw.title, raw.url, raw.snippet);
-                // Truncate to 512 chars to keep reranking fast on CPU.
-                if let Some((idx, _)) = doc.char_indices().nth(512) {
+                // Truncate to 1024 chars. max_length=256 tokens (~1000 chars),
+                // so passing more text gives the cross-encoder fuller context
+                // without exceeding the model's token limit.
+                if let Some((idx, _)) = doc.char_indices().nth(1024) {
                     doc.truncate(idx);
                 }
                 doc
