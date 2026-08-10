@@ -448,18 +448,6 @@ impl RankingStrategy for BgeRerankerStrategy {
 
         let top_indices: Vec<usize> = indices.into_iter().take(TOP_N).collect();
 
-        // Normalize BM25 scores to [0, 1] for the top-N results so they can
-        // be blended with cross-encoder scores.
-        let max_bm25 = top_indices
-            .iter()
-            .map(|&i| bm25_scores[i])
-            .fold(0.0_f32, f32::max);
-        let min_bm25 = top_indices
-            .iter()
-            .map(|&i| bm25_scores[i])
-            .fold(f32::MAX, f32::min);
-        let bm25_range = (max_bm25 - min_bm25).max(1e-6);
-
         let documents: Vec<String> = top_indices
             .iter()
             .map(|&i| {
@@ -498,12 +486,11 @@ impl RankingStrategy for BgeRerankerStrategy {
                     // Cross-encoder returns raw logits (can be negative).
                     // Sigmoid maps to (0, 1).
                     let relevance = 1.0 / (1.0 + (-r.score).exp());
-                    // Normalize BM25 score to [0, 1].
-                    let bm25_norm = (bm25_scores[orig_idx] - min_bm25) / bm25_range;
-                    // Blend BM25 and cross-encoder. BM25 provides keyword
-                    // matching (hard floor), cross-encoder provides semantic
-                    // understanding.
-                    let blended = 0.5 * bm25_norm + 0.5 * relevance;
+                    // BM25 as a keyword-matching floor. normalize() maps to [0,1).
+                    let bm25_norm = normalize(bm25_scores[orig_idx]);
+                    // 20/80 blend: cross-encoder dominates for semantic
+                    // understanding, BM25 preserves keyword precision.
+                    let blended = 0.2 * bm25_norm + 0.8 * relevance;
                     // Authority as a gentle multiplier.
                     let authority_factor = 0.7 + 0.3 * authority.min(1.5) / 1.5;
                     let raw_score = blended * authority_factor;
