@@ -369,14 +369,15 @@ pub struct BgeRerankerStrategy {
 impl BgeRerankerStrategy {
     pub fn new() -> anyhow::Result<Self> {
         // Pool size and intra_threads are tuned so total onnx threads ≈ CPU
-        // cores: pool_size * intra_threads ≈ cores. Each instance uses 2
-        // threads for intra-op parallelism; pool size is capped at 2 to keep
-        // memory usage bounded (~2.8GB for 2 instances of jina-reranker-v2).
+        // cores: pool_size * intra_threads ≈ cores. On machines with many
+        // cores (e.g. 64), we use a larger pool to parallelize across
+        // concurrent requests. Each instance uses ~1.4GB memory.
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
         let intra_threads = 2;
-        let pool_size = (cores / intra_threads).clamp(1, 2);
+        // Cap pool size at 8 to bound memory (~11GB for 8 instances).
+        let pool_size = (cores / intra_threads).clamp(1, 8);
         let mut pool = Vec::with_capacity(pool_size);
         let mut call_counts = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
@@ -395,9 +396,9 @@ impl BgeRerankerStrategy {
         options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
         options.cache_dir = std::path::PathBuf::from("models");
         options.intra_threads = Some(intra_threads);
-        // 512 tokens gives the cross-encoder enough context for technical
-        // content without excessive compute.
-        options.max_length = 512;
+        // 256 tokens keeps reranking fast on CPU while still capturing
+        // the most relevant content from titles and snippets.
+        options.max_length = 256;
         TextRerank::try_new(options)
     }
 }
@@ -424,15 +425,18 @@ impl RankingStrategy for BgeRerankerStrategy {
         const TOP_N: usize = 50;
         const REBUILD_EVERY: u64 = 50;
 
-        // Coarse rank with the full BM25 score (text relevance × position ×
-        // engine weight × domain authority × freshness). Using only raw BM25
-        // text match would let high-volume engines (e.g. GitHub) crowd out
-        // authoritative sources (python.org, docs.rs) from the top-N rerank
-        // pool, since those often have shorter, less keyword-dense titles.
-        let bm25 = Bm25Strategy;
+        // Coarse rank with BM25 (with coverage penalty) to ensure keyword
+        // matching is preserved. The cross-encoder alone can misrank short
+        // snippets; BM25 acts as a hard floor on relevance.
         let bm25_scores: Vec<f32> = items
             .iter()
-            .map(|(raw, engines, weight)| bm25.score(raw, query, *weight, engines))
+            .map(|(raw, _engines, weight)| {
+                let bm25 = bm25_score(raw, query);
+                let position_weight = 1.0 / (raw.position as f32 + 1.0).log2();
+                let authority = domain_authority(&raw.url);
+                let freshness = freshness_weight(raw.published_date);
+                bm25 * position_weight * *weight * authority * freshness
+            })
             .collect();
 
         let mut indices: Vec<usize> = (0..items.len()).collect();
@@ -444,12 +448,25 @@ impl RankingStrategy for BgeRerankerStrategy {
 
         let top_indices: Vec<usize> = indices.into_iter().take(TOP_N).collect();
 
+        // Normalize BM25 scores to [0, 1] for the top-N results so they can
+        // be blended with cross-encoder scores.
+        let max_bm25 = top_indices
+            .iter()
+            .map(|&i| bm25_scores[i])
+            .fold(0.0_f32, f32::max);
+        let min_bm25 = top_indices
+            .iter()
+            .map(|&i| bm25_scores[i])
+            .fold(f32::MAX, f32::min);
+        let bm25_range = (max_bm25 - min_bm25).max(1e-6);
+
         let documents: Vec<String> = top_indices
             .iter()
             .map(|&i| {
                 let (raw, _, _) = &items[i];
                 let mut doc = format!("{} {} {}", raw.title, raw.url, raw.snippet);
-                if let Some((idx, _)) = doc.char_indices().nth(1024) {
+                // Truncate to 512 chars to keep reranking fast on CPU.
+                if let Some((idx, _)) = doc.char_indices().nth(512) {
                     doc.truncate(idx);
                 }
                 doc
@@ -472,17 +489,28 @@ impl RankingStrategy for BgeRerankerStrategy {
             };
 
             if let Ok(results) = reranker.rerank(query.query.as_str(), doc_refs, false, None) {
-                for (rank, r) in results.iter().enumerate() {
-                    let orig_idx = top_indices[rank];
+                for r in results.iter() {
+                    // `rerank` returns results sorted by score descending.
+                    // `r.index` is the position in the input documents slice.
+                    let orig_idx = top_indices[r.index];
                     let (raw, _, _) = &items[orig_idx];
-                    let coverage = query_coverage(&documents[rank], query);
                     let authority = domain_authority(&raw.url);
                     // Cross-encoder returns raw logits (can be negative).
-                    // Sigmoid maps to (0, 1) so the mix formula stays in [0, 1].
+                    // Sigmoid maps to (0, 1).
                     let relevance = 1.0 / (1.0 + (-r.score).exp());
-                    let raw_score = authority * authority * relevance * coverage;
+                    // Normalize BM25 score to [0, 1].
+                    let bm25_norm = (bm25_scores[orig_idx] - min_bm25) / bm25_range;
+                    // Blend BM25 and cross-encoder. BM25 provides keyword
+                    // matching (hard floor), cross-encoder provides semantic
+                    // understanding. 50/50 mix.
+                    let blended = 0.5 * bm25_norm + 0.5 * relevance;
+                    // Authority as a gentle multiplier.
+                    let authority_factor = 0.7 + 0.3 * authority.min(1.5) / 1.5;
+                    let raw_score = blended * authority_factor;
                     scores[orig_idx] = raw_score.clamp(0.0, 1.0);
                 }
+            } else {
+                tracing::error!("rerank failed for query: {}", query.query);
             }
         }
 
@@ -502,20 +530,6 @@ impl RankingStrategy for BgeRerankerStrategy {
 
         scores
     }
-}
-
-/// Fraction of unique query terms that appear in the document.
-fn query_coverage(document: &str, query: &SearchQuery) -> f32 {
-    let query_terms: std::collections::HashSet<String> = tokenize(&query.query).into_iter().collect();
-    if query_terms.is_empty() {
-        return 1.0;
-    }
-    let doc_lower = document.to_lowercase();
-    let matched = query_terms
-        .iter()
-        .filter(|t| doc_lower.contains(t.as_str()))
-        .count() as f32;
-    matched / query_terms.len() as f32
 }
 
 /// Cached bge_reranker instance. Loading the model pool is expensive
