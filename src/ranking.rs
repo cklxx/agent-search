@@ -502,7 +502,7 @@ impl RankingStrategy for BgeRerankerStrategy {
                     let bm25_norm = (bm25_scores[orig_idx] - min_bm25) / bm25_range;
                     // Blend BM25 and cross-encoder. BM25 provides keyword
                     // matching (hard floor), cross-encoder provides semantic
-                    // understanding. 50/50 mix.
+                    // understanding.
                     let blended = 0.5 * bm25_norm + 0.5 * relevance;
                     // Authority as a gentle multiplier.
                     let authority_factor = 0.7 + 0.3 * authority.min(1.5) / 1.5;
