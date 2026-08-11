@@ -299,6 +299,30 @@ fn has_technical_acronym(query: &str) -> bool {
     })
 }
 
+/// Extract uppercase acronym runs (2+ ASCII uppercase letters) from the query.
+/// Used to downweight cross-encoder relevance for results that don't contain
+/// the acronym, since the CE often fails to recognize technical acronyms.
+fn extract_acronyms(query: &str) -> Vec<String> {
+    let mut acronyms = Vec::new();
+    for word in query.split_whitespace() {
+        let mut current = String::new();
+        for c in word.chars() {
+            if c.is_ascii_uppercase() {
+                current.push(c);
+            } else {
+                if current.len() >= 2 {
+                    acronyms.push(current.clone());
+                }
+                current.clear();
+            }
+        }
+        if current.len() >= 2 {
+            acronyms.push(current);
+        }
+    }
+    acronyms
+}
+
 /// TF-IDF. IDF approximated from term length (no corpus stats).
 pub struct TfIdfStrategy;
 
@@ -346,7 +370,7 @@ impl RankingStrategy for PositionOnlyStrategy {
     }
 
     fn score(&self, raw: &RawSearchResult, _query: &SearchQuery, engine_weight: f32, _engines: &[String]) -> f32 {
-        let pos_score = 1.0 / (raw.position as f32 + 1.0).log2();
+        let pos_score = 1.0 / (raw.position as f32 + 2.0).log2();
         let authority = domain_authority(&raw.url);
         let freshness = freshness_weight(raw.published_date);
         let score = pos_score * engine_weight * authority * freshness;
@@ -414,7 +438,7 @@ impl RankingStrategy for SearxngOnlyStrategy {
         if !engines.iter().any(|e| e == "searxng") {
             return 0.0;
         }
-        let pos_score = 1.0 / (raw.position as f32 + 1.0).log2();
+        let pos_score = 1.0 / (raw.position as f32 + 2.0).log2();
         let authority = domain_authority(&raw.url);
         let freshness = freshness_weight(raw.published_date);
         let score = pos_score * authority * freshness;
@@ -547,10 +571,21 @@ impl RankingStrategy for BgeRerankerStrategy {
         // (jina-reranker-v2-base-multilingual) underperforms on queries with
         // technical acronyms (RAG, GPTQ, CRISPR, ...) where exact keyword
         // matching is more reliable. For those queries, lean more on BM25.
-        let (bm25_weight, ce_weight) = if has_technical_acronym(&query.query) {
-            (0.55, 0.45)
+        let is_acronym_query = has_technical_acronym(&query.query);
+        let (bm25_weight, ce_weight) = if is_acronym_query {
+            (0.80, 0.20)
         } else {
             (0.45, 0.55)
+        };
+
+        // For acronym queries, extract the uppercase runs so we can penalize
+        // the cross-encoder relevance of results that don't contain them.
+        // The CE often matches on common words (e.g. "chunk") and misses
+        // that the acronym is the core of the query.
+        let acronym_terms: Vec<String> = if is_acronym_query {
+            extract_acronyms(&query.query)
+        } else {
+            Vec::new()
         };
 
         let mut scores = vec![0.0; items.len()];
@@ -571,15 +606,30 @@ impl RankingStrategy for BgeRerankerStrategy {
                     let freshness = freshness_weight(raw.published_date);
                     // Cross-encoder returns raw logits (can be negative).
                     // Sigmoid maps to (0, 1).
-                    let relevance = 1.0 / (1.0 + (-r.score).exp());
+                    let mut relevance = 1.0 / (1.0 + (-r.score).exp());
+                    // For acronym queries, if the result doesn't contain any
+                    // of the query's acronym terms, the CE relevance is
+                    // unreliable (it likely matched on common words). Zero it
+                    // out so BM25 exact-match fully determines ranking.
+                    if !acronym_terms.is_empty() {
+                        let text = format!("{} {}", raw.title, raw.snippet).to_uppercase();
+                        if !acronym_terms.iter().any(|a| text.contains(a.as_str())) {
+                            relevance = 0.0;
+                        }
+                    }
                     // BM25 as a keyword-matching floor. normalize() maps to [0,1).
                     let bm25_norm = normalize(bm25_scores[orig_idx]);
                     let blended = bm25_weight * bm25_norm + ce_weight * relevance;
-                    // Authority, engine weight, and freshness as multipliers,
-                    // matching the bm25 strategy's treatment. Clamp each to
-                    // avoid overwhelming the cross-encoder relevance signal.
-                    let authority_factor = authority.clamp(0.3, 1.3);
-                    let weight_factor = weight.clamp(0.7, 1.3);
+                    // For acronym queries, exact keyword match is the primary
+                    // signal; authority/engine-weight can drown it out (e.g. a
+                    // StackOverflow answer about "chunk" beating a HackerNews
+                    // post about "RAG"). Neutralize those multipliers so BM25
+                    // decides. For normal queries, apply them as usual.
+                    let (authority_factor, weight_factor) = if is_acronym_query {
+                        (1.0, 1.0)
+                    } else {
+                        (authority.clamp(0.3, 1.3), weight.clamp(0.7, 1.3))
+                    };
                     let raw_score = blended * authority_factor * weight_factor * freshness;
                     scores[orig_idx] = raw_score.clamp(0.0, 1.0);
                 }
