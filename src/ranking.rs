@@ -132,8 +132,8 @@ impl RankingStrategy for Bm25Strategy {
 
     fn score(&self, raw: &RawSearchResult, query: &SearchQuery, engine_weight: f32, _engines: &[String]) -> f32 {
         let bm25 = bm25_score(raw, query);
-        // Gentler position decay: 1/log2(pos+1) so cross-engine position
-        // differences don't overwhelm relevance and authority signals.
+        // Position decay: 1/log2(pos+2) so position 0 has weight 1.0
+        // (not infinity), letting BM25 relevance distinguish top results.
         let position_weight = 1.0 / (raw.position as f32 + 2.0).log2();
         let authority = domain_authority(&raw.url);
         let freshness = freshness_weight(raw.published_date);
