@@ -236,13 +236,41 @@ impl LocalIndex {
             self.query_field => String::new(),
             self.title_field => title.to_string(),
             self.url_field => url.to_string(),
-            self.snippet_field => content.chars().take(300).collect::<String>(),
+            self.snippet_field => content.chars().take(1000).collect::<String>(),
             self.content_field => content.to_string(),
             self.score_field => 0.0,
             self.engine_field => "local".to_string(),
         ))?;
         index_writer.commit()?;
         Ok(())
+    }
+
+    /// Bulk-index multiple pages in a single commit. Much faster than calling
+    /// `index_page` in a loop (one commit per call).
+    pub fn bulk_index(
+        &self,
+        pages: &[(String, String, String)],
+        dedup: &DedupService,
+    ) -> Result<usize, TantivyError> {
+        let mut index_writer: IndexWriter = self.index.writer(50_000_000)?;
+        let mut count = 0;
+        for (url, title, content) in pages {
+            if !dedup.insert(url) {
+                continue;
+            }
+            index_writer.add_document(doc!(
+                self.query_field => String::new(),
+                self.title_field => title.clone(),
+                self.url_field => url.clone(),
+                self.snippet_field => content.chars().take(1000).collect::<String>(),
+                self.content_field => content.clone(),
+                self.score_field => 0.0,
+                self.engine_field => "local".to_string(),
+            ))?;
+            count += 1;
+        }
+        index_writer.commit()?;
+        Ok(count)
     }
 
     /// Returns cached results for the exact query. The query field is STRING
@@ -265,6 +293,13 @@ impl LocalIndex {
     }
 
     /// Full-text BM25 search over title + content fields.
+    ///
+    /// Short queries (≤3 terms) use AND semantics for precision; longer
+    /// queries use OR semantics for recall. The cross-encoder reranks
+    /// the top results, so recall matters more for long queries.
+    ///
+    /// Query expansion: each English word is stemmed and the stem is
+    /// appended to the query, so "borrowing" matches "borrow" in the index.
     pub fn search_fulltext(&self, query: &str, limit: usize) -> Option<Vec<SearchResult>> {
         let reader = self.index.reader().ok()?;
         let searcher = reader.searcher();
@@ -273,11 +308,17 @@ impl LocalIndex {
             &self.index,
             vec![self.title_field, self.content_field],
         );
-        // AND: all query terms must match. Default OR makes 2-gram queries
-        // match any document sharing a single bigram (e.g. "python" in a
-        // 3D-printing answer).
-        query_parser.set_conjunction_by_default();
-        let parsed_query = query_parser.parse_query(query).ok()?;
+
+        // Expand query with stemmed forms for better recall.
+        let expanded = expand_query(query);
+
+        // Short queries: require all terms to match (AND).
+        // Long queries: any term can match (OR) for broader recall.
+        if count_query_terms(&expanded) <= 3 {
+            query_parser.set_conjunction_by_default();
+        }
+
+        let parsed_query = query_parser.parse_query(&expanded).ok()?;
 
         let top_docs = searcher
             .search(&parsed_query, &TopDocs::with_limit(limit))
@@ -305,7 +346,12 @@ impl LocalIndex {
             };
             let title = field_str(&retrieved_doc, self.title_field);
             let url = field_str(&retrieved_doc, self.url_field);
-            let snippet = field_str(&retrieved_doc, self.snippet_field);
+            // Use the first 1000 chars of content as the snippet. For crawled
+            // pages this is full page text; for cached results it's the engine
+            // snippet. Longer snippets improve keyword-overlap relevance
+            // scoring without changing the stored index.
+            let content = field_str(&retrieved_doc, self.content_field);
+            let snippet: String = content.chars().take(1000).collect();
             let engine = field_str(&retrieved_doc, self.engine_field);
 
             // Dedup by normalized URL: the same page may be indexed under
@@ -376,4 +422,131 @@ fn build_schema() -> (Schema, IndexFields) {
 
 fn field_str(doc: &tantivy::schema::TantivyDocument, field: Field) -> String {
     doc.get_first(field).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+/// Count the number of searchable terms in a query string.
+///
+/// ASCII alphanumeric runs count as one term each; CJK characters count
+/// as one term each. This matches the MixedCjkTokenizer behavior.
+fn count_query_terms(query: &str) -> usize {
+    let mut count = 0;
+    let mut in_ascii_word = false;
+    for c in query.chars() {
+        if c.is_ascii_alphanumeric() {
+            if !in_ascii_word {
+                count += 1;
+                in_ascii_word = true;
+            }
+        } else if is_cjk(c) {
+            count += 1;
+            in_ascii_word = false;
+        } else {
+            in_ascii_word = false;
+        }
+    }
+    count
+}
+
+/// Expand a query by appending stemmed forms of English words.
+///
+/// For each ASCII word, a simplified stem is computed and appended.
+/// This improves recall: "borrowing" also matches "borrow" in the index.
+/// CJK characters are passed through unchanged.
+fn expand_query(query: &str) -> String {
+    let mut result = String::with_capacity(query.len() * 2);
+    let mut current_word = String::new();
+
+    for c in query.chars() {
+        if c.is_ascii_alphanumeric() {
+            current_word.push(c);
+        } else {
+            if !current_word.is_empty() {
+                result.push_str(&current_word);
+                if let Some(stem) = stem_word(&current_word) {
+                    if stem != current_word.to_lowercase() {
+                        result.push(' ');
+                        result.push_str(&stem);
+                    }
+                }
+                current_word.clear();
+            }
+            result.push(c);
+        }
+    }
+
+    if !current_word.is_empty() {
+        result.push_str(&current_word);
+        if let Some(stem) = stem_word(&current_word) {
+            if stem != current_word.to_lowercase() {
+                result.push(' ');
+                result.push_str(&stem);
+            }
+        }
+    }
+
+    result
+}
+
+/// Simplified English stemmer. Returns the stemmed form if it differs
+/// from the lowercase original. Handles common suffixes: -ing, -ed,
+/// -es, -s, -ies, -er, -est, -ly.
+fn stem_word(word: &str) -> Option<String> {
+    let lower = word.to_lowercase();
+    if lower.len() <= 3 {
+        return None;
+    }
+
+    let stem = if let Some(s) = lower.strip_suffix("ies") {
+        if s.len() > 1 {
+            format!("{s}y")
+        } else {
+            return None;
+        }
+    } else if let Some(s) = lower.strip_suffix("es") {
+        if s.len() > 1 {
+            s.to_string()
+        } else {
+            return None;
+        }
+    } else if let Some(s) = lower.strip_suffix("ing") {
+        if s.len() > 1 {
+            // running → run (drop double consonant), making → make
+            if s.ends_with(|c: char| !"aeiou".contains(c))
+                && s.len() > 1
+                && s.chars().last() == s.chars().nth_back(1)
+            {
+                s[..s.len() - 1].to_string()
+            } else {
+                s.to_string()
+            }
+        } else {
+            return None;
+        }
+    } else if let Some(s) = lower.strip_suffix("ed") {
+        if let Some(stem) = s.strip_suffix('i') {
+            format!("{stem}y")
+        } else {
+            s.to_string()
+        }
+    } else if let Some(s) = lower.strip_suffix("er") {
+        s.to_string()
+    } else if let Some(s) = lower.strip_suffix("est") {
+        s.to_string()
+    } else if let Some(s) = lower.strip_suffix("ly") {
+        s.to_string()
+    } else if let Some(s) = lower.strip_suffix('s') {
+        if !lower.ends_with("ss") && s.len() > 1 {
+            s.to_string()
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    if stem.len() >= 2 && stem != lower {
+        Some(stem)
+    } else {
+        None
+    }
 }

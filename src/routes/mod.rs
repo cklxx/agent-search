@@ -172,30 +172,167 @@ pub async fn search(
 }
 
 /// Crawl the top N result URLs and index their content for future full-text searches.
+///
+/// Safety measures:
+/// - SSRF protection: skip URLs resolving to internal/private IP ranges.
+/// - Per-domain cap: at most 2 pages per domain per query.
+/// - robots.txt: skip paths disallowed for our user-agent.
+/// - Rate limiting: per-domain concurrency cap + 1s delay between same-domain requests.
 async fn crawl_result_pages(state: &AppState, results: &[crate::models::result::SearchResult]) {
     let state = state.clone();
     let urls: Vec<String> = results
         .iter()
-        .take(5)
+        .take(10)
         .map(|r| r.url.clone())
         .filter(|u| u.starts_with("http"))
         .collect();
 
     tokio::spawn(async move {
+        // SSRF filter + per-domain cap (2 pages per domain).
+        let mut domain_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut filtered: Vec<String> = Vec::new();
         for url in urls {
+            if is_internal_url(&url).await {
+                tracing::debug!(url = %url, "skipping internal URL (SSRF protection)");
+                continue;
+            }
+            let domain = match url::Url::parse(&url) {
+                Ok(u) => u.host_str().unwrap_or("").to_string(),
+                Err(_) => continue,
+            };
+            let count = domain_counts.entry(domain).or_insert(0);
+            if *count >= 2 {
+                continue;
+            }
+            *count += 1;
+            filtered.push(url);
+        }
+
+        // Collect crawled pages, then bulk-index in one commit to avoid
+        // segment explosion (one commit per page creates many small segments
+        // that trigger expensive merges).
+        let mut pages: Vec<(String, String, String)> = Vec::new();
+
+        for url in filtered {
+            let domain = match url::Url::parse(&url) {
+                Ok(u) => u.host_str().unwrap_or("").to_string(),
+                Err(_) => continue,
+            };
+
+            // robots.txt check.
+            if !robots_allowed(&state.http_client, &url, &domain).await {
+                tracing::debug!(url = %url, "skipping URL disallowed by robots.txt");
+                continue;
+            }
+
+            // Per-domain concurrency limit.
+            let _permit = state.domain_rate_limiter.acquire(&domain).await;
+
             match crate::crawler::fetch_and_extract(&state.http_client, &url).await {
                 Ok((title, content)) => {
                     if !content.is_empty() {
-                        let _ = state.local_index.index_page(&url, &title, &content, &state.dedup);
-                        tracing::debug!(url = %url, len = content.len(), "crawled and indexed page");
+                        let len = content.len();
+                        pages.push((url.clone(), title, content));
+                        tracing::debug!(url = %url, len, "crawled page");
                     }
                 }
                 Err(e) => {
                     tracing::debug!(url = %url, error = %e, "crawl failed");
                 }
             }
+
+            // 1s delay between requests to the same domain.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        if !pages.is_empty() {
+            match state.local_index.bulk_index(&pages, &state.dedup) {
+                Ok(n) => tracing::debug!(count = n, "bulk-indexed crawled pages"),
+                Err(e) => tracing::warn!(error = %e, "bulk index failed"),
+            }
         }
     });
+}
+
+/// Returns true if the URL's host resolves to an internal/private IP address.
+async fn is_internal_url(url: &str) -> bool {
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return true,
+    };
+    let host = match parsed.host_str() {
+        Some(h) => h,
+        None => return true,
+    };
+
+    // Block obvious internal hosts.
+    if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
+        return true;
+    }
+
+    // Resolve and check each IP.
+    match tokio::net::lookup_host(format!("{}:0", host)).await {
+        Ok(addrs) => {
+            for addr in addrs {
+                let ip = addr.ip();
+                let is_internal = match ip {
+                    std::net::IpAddr::V4(v4) => {
+                        v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+                    }
+                    std::net::IpAddr::V6(v6) => {
+                        v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
+                    }
+                };
+                if is_internal {
+                    return true;
+                }
+            }
+            false
+        }
+        Err(_) => true, // can't resolve → block
+    }
+}
+
+/// Check robots.txt for the given URL. Returns true if crawling is allowed.
+async fn robots_allowed(client: &reqwest::Client, url: &str, domain: &str) -> bool {
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    let path = parsed.path();
+    let robots_url = format!("{}://{}/robots.txt", parsed.scheme(), domain);
+
+    let body = match client.get(&robots_url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(t) => t,
+            Err(_) => return true, // can't read robots.txt → allow
+        },
+        _ => return true, // no robots.txt → allow
+    };
+
+    // Simple robots.txt parser: check if any "Disallow" rule applies to our path.
+    // We respect rules for "*" user-agent.
+    let mut in_our_agent = false;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let lower = line.to_lowercase();
+        if lower.starts_with("user-agent:") {
+            let ua = line.split(':').nth(1).map(|s| s.trim()).unwrap_or("");
+            in_our_agent = ua == "*" || ua.contains("Chrome") || ua.contains("Mozilla");
+        } else if in_our_agent && lower.starts_with("disallow:") {
+            let disallowed = line.split(':').nth(1).map(|s| s.trim()).unwrap_or("");
+            if disallowed.is_empty() {
+                continue; // empty disallow = allow all
+            }
+            if path.starts_with(disallowed) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// POST /search/ab — run two strategies side-by-side.
@@ -239,18 +376,52 @@ pub async fn search_ab(
         }
     };
 
+    // Local full-text results to supplement upstream engines (which may time
+    // out or return few results). OR-semantics BM25 over cached pages.
+    let local_results = state
+        .local_index
+        .search_fulltext(&query.query, 50)
+        .unwrap_or_default();
+
+    // Short upstream deadline: rely primarily on the local index, let fast
+    // engines contribute without blocking on slow/unreachable ones.
+    let upstream_deadline = std::time::Duration::from_secs(3);
     let fetch_result = tokio::time::timeout(
-        state.request_timeout,
-        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, aggregator::ENGINE_FANOUT_DEADLINE, &state.engine_semaphore, &state.domain_rate_limiter),
+        upstream_deadline,
+        aggregator::fetch_raw_results(&query, &state.registry, &state.suspension, upstream_deadline, &state.engine_semaphore, &state.domain_rate_limiter),
     )
     .await;
 
-    let (dedup_map, errors) = match fetch_result {
-        Ok(v) => v,
-        Err(_) => {
-            return ApiError::new(ErrorCode::Timeout, "search timed out").into_response();
+    // On upstream failure/timeout, fall back to local index results only.
+    let (mut dedup_map, errors) = fetch_result.unwrap_or_default();
+
+    // Merge local index results into the dedup map. Local results use engine
+    // "local" and weight 1.0; if the same URL came from upstream, the upstream
+    // entry (with its engines and weight) wins.
+    for r in &local_results {
+        let key = normalize_url(&r.url);
+        let entry = dedup_map.entry(key).or_insert_with(|| {
+            (
+                RawSearchResult {
+                    title: r.title.clone(),
+                    url: r.url.clone(),
+                    snippet: r.snippet.clone(),
+                    published_date: r.published_date,
+                    position: 1,
+                },
+                Vec::new(),
+                r.weight,
+            )
+        });
+        if entry.1.is_empty() {
+            entry.2 = r.weight;
         }
-    };
+        for e in &r.engines {
+            if !entry.1.contains(e) {
+                entry.1.push(e.clone());
+            }
+        }
+    }
 
     let query_clone = query.clone();
     let dedup_map_clone = dedup_map.clone();
@@ -268,6 +439,9 @@ pub async fn search_ab(
             return ApiError::new(ErrorCode::InternalError, "scoring task panicked").into_response();
         }
     };
+
+    // Crawl top results to build up the local full-text index for future queries.
+    crawl_result_pages(&state, &results_b).await;
 
     let urls_a: std::collections::HashSet<&str> = results_a.iter().map(|r| r.url.as_str()).collect();
     let urls_b: std::collections::HashSet<&str> = results_b.iter().map(|r| r.url.as_str()).collect();
@@ -492,6 +666,45 @@ pub async fn index_page(
                 "title": title,
                 "content_length": len,
                 "indexed": true,
+            })),
+        )
+            .into_response(),
+        Err(e) => ApiError::new(ErrorCode::InternalError, e.to_string()).into_response(),
+    }
+}
+
+/// POST /index/bulk — bulk-import pages (e.g. from open datasets).
+/// Body: JSON array of {url, title, content}. Single commit for speed.
+pub async fn bulk_index_pages(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let docs = match body.as_array() {
+        Some(arr) => arr,
+        None => {
+            return ApiError::new(ErrorCode::ValidationError, "expected JSON array")
+                .with_param("body", "[{url, title, content}, ...]")
+                .into_response();
+        }
+    };
+
+    let mut pages: Vec<(String, String, String)> = Vec::with_capacity(docs.len());
+    for doc in docs {
+        let url = doc.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if url.is_empty() || content.is_empty() {
+            continue;
+        }
+        pages.push((url, title, content));
+    }
+
+    match state.local_index.bulk_index(&pages, &state.dedup) {
+        Ok(count) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "indexed": count,
+                "skipped": pages.len() - count,
             })),
         )
             .into_response(),
