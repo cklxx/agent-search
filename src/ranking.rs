@@ -631,6 +631,8 @@ impl RankingStrategy for BgeRerankerStrategy {
                         (authority.clamp(0.3, 1.3), weight.clamp(0.7, 1.3))
                     };
                     let raw_score = blended * authority_factor * weight_factor * freshness;
+                    // Clamp to [0,1]. normalize(x)=x/(1+x) was tried but
+                    // regressed NDCG/MRR; scores rarely exceed 1.0 in practice.
                     scores[orig_idx] = raw_score.clamp(0.0, 1.0);
                 }
             } else {
