@@ -278,14 +278,25 @@ fn normalize(score: f32) -> f32 {
     score / (1.0 + score)
 }
 
-/// Returns true if the query contains a technical acronym (all-uppercase
-/// word of length >= 2, e.g. "RAG", "GPTQ", "CRISPR"). The cross-encoder
-/// often fails to interpret these correctly, so BM25 exact-match gets more
-/// weight for such queries.
+/// Returns true if the query contains a technical acronym (a run of 2+
+/// uppercase ASCII letters, e.g. "RAG", "GPTQ", "HTTP/2", "KV-cache").
+/// The cross-encoder often fails to interpret these correctly, so BM25
+/// exact-match gets more weight for such queries.
 fn has_technical_acronym(query: &str) -> bool {
-    query
-        .split_whitespace()
-        .any(|w| w.len() >= 2 && w.chars().all(|c| c.is_ascii_uppercase()))
+    query.split_whitespace().any(|w| {
+        let mut upper_run = 0;
+        for c in w.chars() {
+            if c.is_ascii_uppercase() {
+                upper_run += 1;
+                if upper_run >= 2 {
+                    return true;
+                }
+            } else {
+                upper_run = 0;
+            }
+        }
+        false
+    })
 }
 
 /// TF-IDF. IDF approximated from term length (no corpus stats).
