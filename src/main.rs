@@ -21,7 +21,7 @@ use agent_search::engine::EngineSuspensionManager;
 use agent_search::index::LocalIndex;
 use agent_search::mcp::{mcp_messages, mcp_post, mcp_sse};
 use agent_search::ranking::get_strategy;
-use agent_search::routes::{AppState, bulk_index_pages, chat_completions, crawl_url, fetch_content, health, index_page, list_engines, list_strategies, messages, search, search_ab, search_stream, web_search};
+use agent_search::routes::{AppState, bulk_index_pages, chat_completions, crawl_url, fetch_content, force_merge_index, health, index_page, list_engines, list_strategies, messages, search, search_ab, search_stream, web_search};
 
 fn main() -> anyhow::Result<()> {
     // Cross-encoder reranking runs on spawn_blocking (CPU-heavy, must not
@@ -109,7 +109,8 @@ async fn async_main() -> anyhow::Result<()> {
         .route("/content", get(fetch_content))
         .route("/crawl", post(crawl_url))
         .route("/index", post(index_page))
-        .route("/index/bulk", post(bulk_index_pages).route_layer(DefaultBodyLimit::max(100 * 1024 * 1024)));
+        .route("/index/bulk", post(bulk_index_pages).route_layer(DefaultBodyLimit::max(100 * 1024 * 1024)))
+        .route("/index/merge", post(force_merge_index));
 
     // MCP server (Streamable HTTP + legacy SSE transport).
     let app = if config.mcp_enabled {

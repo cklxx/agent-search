@@ -273,6 +273,21 @@ impl LocalIndex {
         Ok(count)
     }
 
+    /// Merge all segments into one. Dramatically speeds up search when the
+    /// index has many small segments (e.g. after per-page indexing).
+    pub fn force_merge(&self) -> Result<(), TantivyError> {
+        let segment_ids = self.index.searchable_segment_ids()?;
+        if segment_ids.len() <= 1 {
+            return Ok(());
+        }
+        // Larger heap for the merge: 901 segments × ~650 docs each needs
+        // more than the 50MB write buffer to avoid spilling.
+        let mut index_writer: IndexWriter = self.index.writer(500_000_000)?;
+        index_writer.merge(&segment_ids).wait()?;
+        index_writer.commit()?;
+        Ok(())
+    }
+
     /// Returns cached results for the exact query. The query field is STRING
     /// (untokenized), so a TermQuery does exact string matching.
     pub fn search_cached(&self, query: &str) -> Option<Vec<SearchResult>> {

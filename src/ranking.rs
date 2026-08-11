@@ -227,10 +227,65 @@ fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
+/// Extract the most query-relevant window from a long text.
+///
+/// Splits the text into overlapping windows of `target_len` characters and
+/// returns the one with the highest query term overlap. This gives the
+/// cross-encoder the most relevant context instead of the first N characters
+/// (which are often navigation/boilerplate).
+fn extract_relevant_snippet(text: &str, query: &str, target_len: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= target_len {
+        return text.to_string();
+    }
+
+    let query_terms: std::collections::HashSet<String> = tokenize(query).into_iter().collect();
+    if query_terms.is_empty() {
+        return chars[..target_len].iter().collect();
+    }
+
+    // Step by half the target length for overlapping windows.
+    let step = target_len / 2;
+    let mut best_start = 0;
+    let mut best_score = 0usize;
+
+    let mut start = 0;
+    while start < chars.len() {
+        let end = (start + target_len).min(chars.len());
+        let window: String = chars[start..end].iter().collect();
+        let window_tokens = tokenize(&window);
+        let score = window_tokens
+            .iter()
+            .filter(|t| query_terms.contains(*t))
+            .count();
+        if score > best_score {
+            best_score = score;
+            best_start = start;
+        }
+        if end >= chars.len() {
+            break;
+        }
+        start += step;
+    }
+
+    let end = (best_start + target_len).min(chars.len());
+    chars[best_start..end].iter().collect()
+}
+
 /// Normalize a non-negative score to [0, 1) while preserving order.
 /// Unlike sigmoid, 0 maps to 0.
 fn normalize(score: f32) -> f32 {
     score / (1.0 + score)
+}
+
+/// Returns true if the query contains a technical acronym (all-uppercase
+/// word of length >= 2, e.g. "RAG", "GPTQ", "CRISPR"). The cross-encoder
+/// often fails to interpret these correctly, so BM25 exact-match gets more
+/// weight for such queries.
+fn has_technical_acronym(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .any(|w| w.len() >= 2 && w.chars().all(|c| c.is_ascii_uppercase()))
 }
 
 /// TF-IDF. IDF approximated from term length (no corpus stats).
@@ -424,7 +479,7 @@ impl RankingStrategy for BgeRerankerStrategy {
             return Vec::new();
         }
 
-        const TOP_N: usize = 30;
+        const TOP_N: usize = 50;
         const REBUILD_EVERY: u64 = 50;
 
         // Coarse rank with BM25 term frequency + position to select the top-N
@@ -454,7 +509,12 @@ impl RankingStrategy for BgeRerankerStrategy {
             .iter()
             .map(|&i| {
                 let (raw, _, _) = &items[i];
-                let mut doc = format!("{} {} {}", raw.title, raw.url, raw.snippet);
+                // Query-aware snippet: find the window of content with the
+                // most query term matches. The first 1000 chars are often
+                // navigation/boilerplate, which gives the cross-encoder
+                // little signal to judge relevance.
+                let snippet = extract_relevant_snippet(&raw.snippet, &query.query, 1000);
+                let mut doc = format!("{} {}", raw.title, snippet);
                 // Truncate to 2048 chars. max_length=512 tokens (~1500 chars for
                 // multilingual text), so this gives the cross-encoder fuller
                 // context without exceeding the model's token limit.
@@ -471,6 +531,16 @@ impl RankingStrategy for BgeRerankerStrategy {
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.pool.len();
         let count = self.call_counts[idx].fetch_add(1, Ordering::Relaxed);
         let should_rebuild = count > 0 && count.is_multiple_of(REBUILD_EVERY);
+
+        // Query-dependent blend weight. The cross-encoder
+        // (jina-reranker-v2-base-multilingual) underperforms on queries with
+        // technical acronyms (RAG, GPTQ, CRISPR, ...) where exact keyword
+        // matching is more reliable. For those queries, lean more on BM25.
+        let (bm25_weight, ce_weight) = if has_technical_acronym(&query.query) {
+            (0.60, 0.40)
+        } else {
+            (0.45, 0.55)
+        };
 
         let mut scores = vec![0.0; items.len()];
 
@@ -493,9 +563,7 @@ impl RankingStrategy for BgeRerankerStrategy {
                     let relevance = 1.0 / (1.0 + (-r.score).exp());
                     // BM25 as a keyword-matching floor. normalize() maps to [0,1).
                     let bm25_norm = normalize(bm25_scores[orig_idx]);
-                    // 25/75 blend: cross-encoder dominates for semantic
-                    // understanding, BM25 preserves keyword precision.
-                    let blended = 0.25 * bm25_norm + 0.75 * relevance;
+                    let blended = bm25_weight * bm25_norm + ce_weight * relevance;
                     // Authority, engine weight, and freshness as multipliers,
                     // matching the bm25 strategy's treatment. Clamp each to
                     // avoid overwhelming the cross-encoder relevance signal.

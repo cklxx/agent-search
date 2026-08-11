@@ -712,6 +712,19 @@ pub async fn bulk_index_pages(
     }
 }
 
+/// Force-merge all index segments into one. Run after bulk imports to keep
+/// search latency low.
+pub async fn force_merge_index(State(state): State<AppState>) -> impl IntoResponse {
+    match state.local_index.force_merge() {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "merged": true })),
+        )
+            .into_response(),
+        Err(e) => ApiError::new(ErrorCode::InternalError, e.to_string()).into_response(),
+    }
+}
+
 /// Call the upstream LLM relay's web_search tool and return parsed results.
 pub async fn search_upstream(
     client: &reqwest::Client,
