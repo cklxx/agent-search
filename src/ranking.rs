@@ -537,7 +537,7 @@ impl RankingStrategy for BgeRerankerStrategy {
         // technical acronyms (RAG, GPTQ, CRISPR, ...) where exact keyword
         // matching is more reliable. For those queries, lean more on BM25.
         let (bm25_weight, ce_weight) = if has_technical_acronym(&query.query) {
-            (0.60, 0.40)
+            (0.55, 0.45)
         } else {
             (0.45, 0.55)
         };
