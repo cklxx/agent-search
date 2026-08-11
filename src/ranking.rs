@@ -299,6 +299,24 @@ fn has_technical_acronym(query: &str) -> bool {
     })
 }
 
+/// Returns true if the query contains specific identifiers that require
+/// exact keyword matching: config directives (proxy_pass, ExecStart),
+/// API names (functools.wraps), version numbers, or error messages.
+/// The cross-encoder often matches on semantic similarity and misses
+/// the exact identifier, so BM25 gets more weight for these queries.
+fn has_specific_identifier(query: &str) -> bool {
+    query.split_whitespace().any(|w| {
+        w.contains('_') || w.contains('.') || w.contains('-')
+            || w.chars().any(|c| c.is_ascii_digit())
+    })
+}
+
+/// Returns true if the query relies on exact keyword matching rather than
+/// semantic similarity: acronyms, specific identifiers, or error messages.
+fn needs_exact_match(query: &str) -> bool {
+    has_technical_acronym(query) || has_specific_identifier(query)
+}
+
 /// Extract uppercase acronym runs (2+ ASCII uppercase letters) from the query.
 /// Used to downweight cross-encoder relevance for results that don't contain
 /// the acronym, since the CE often fails to recognize technical acronyms.
@@ -569,10 +587,11 @@ impl RankingStrategy for BgeRerankerStrategy {
 
         // Query-dependent blend weight. The cross-encoder
         // (jina-reranker-v2-base-multilingual) underperforms on queries with
-        // technical acronyms (RAG, GPTQ, CRISPR, ...) where exact keyword
-        // matching is more reliable. For those queries, lean more on BM25.
-        let is_acronym_query = has_technical_acronym(&query.query);
-        let (bm25_weight, ce_weight) = if is_acronym_query {
+        // technical acronyms (RAG, GPTQ, CRISPR, ...) or specific identifiers
+        // (proxy_pass, ExecStart, RS256) where exact keyword matching is more
+        // reliable. For those queries, lean more on BM25.
+        let is_exact_match_query = needs_exact_match(&query.query);
+        let (bm25_weight, ce_weight) = if is_exact_match_query {
             (0.80, 0.20)
         } else {
             (0.45, 0.55)
@@ -582,7 +601,7 @@ impl RankingStrategy for BgeRerankerStrategy {
         // the cross-encoder relevance of results that don't contain them.
         // The CE often matches on common words (e.g. "chunk") and misses
         // that the acronym is the core of the query.
-        let acronym_terms: Vec<String> = if is_acronym_query {
+        let acronym_terms: Vec<String> = if has_technical_acronym(&query.query) {
             extract_acronyms(&query.query)
         } else {
             Vec::new()
@@ -620,12 +639,13 @@ impl RankingStrategy for BgeRerankerStrategy {
                     // BM25 as a keyword-matching floor. normalize() maps to [0,1).
                     let bm25_norm = normalize(bm25_scores[orig_idx]);
                     let blended = bm25_weight * bm25_norm + ce_weight * relevance;
-                    // For acronym queries, exact keyword match is the primary
-                    // signal; authority/engine-weight can drown it out (e.g. a
-                    // StackOverflow answer about "chunk" beating a HackerNews
-                    // post about "RAG"). Neutralize those multipliers so BM25
-                    // decides. For normal queries, apply them as usual.
-                    let (authority_factor, weight_factor) = if is_acronym_query {
+                    // For exact-match queries, exact keyword match is the
+                    // primary signal; authority/engine-weight can drown it out
+                    // (e.g. a StackOverflow answer about "chunk" beating a
+                    // HackerNews post about "RAG"). Neutralize those
+                    // multipliers so BM25 decides. For normal queries, apply
+                    // them as usual.
+                    let (authority_factor, weight_factor) = if is_exact_match_query {
                         (1.0, 1.0)
                     } else {
                         (authority.clamp(0.3, 1.3), weight.clamp(0.7, 1.3))
