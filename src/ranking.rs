@@ -197,7 +197,7 @@ fn bm25_score(raw: &RawSearchResult, query: &SearchQuery) -> f32 {
 
     // Query coverage: boost results that match more query terms.
     let coverage = matched_terms as f32 / query_terms.len() as f32;
-    score * (0.5 + 0.5 * coverage)
+    score * (0.3 + 0.7 * coverage)
 }
 
 fn tokenize(text: &str) -> Vec<String> {
