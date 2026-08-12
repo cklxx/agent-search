@@ -311,10 +311,22 @@ fn has_specific_identifier(query: &str) -> bool {
     })
 }
 
+/// Returns true if the query is a comparison query (contains "vs" or
+/// "versus"). For such queries, results should mention all compared
+/// entities, so exact keyword matching is more important than semantic
+/// similarity.
+fn is_comparison_query(query: &str) -> bool {
+    query.split_whitespace().any(|w| {
+        let lower = w.to_lowercase();
+        lower == "vs" || lower == "versus" || lower == "vs."
+    })
+}
+
 /// Returns true if the query relies on exact keyword matching rather than
-/// semantic similarity: acronyms, specific identifiers, or error messages.
+/// semantic similarity: acronyms, specific identifiers, comparison queries,
+/// or error messages.
 fn needs_exact_match(query: &str) -> bool {
-    has_technical_acronym(query) || has_specific_identifier(query)
+    has_technical_acronym(query) || has_specific_identifier(query) || is_comparison_query(query)
 }
 
 /// Extract uppercase acronym runs (2+ ASCII uppercase letters) from the query.
