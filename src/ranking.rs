@@ -301,13 +301,17 @@ fn has_technical_acronym(query: &str) -> bool {
 
 /// Returns true if the query contains specific identifiers that require
 /// exact keyword matching: config directives (proxy_pass, ExecStart),
-/// API names (functools.wraps), version numbers, or error messages.
+/// API names (functools.wraps), version numbers, or camelCase terms.
 /// The cross-encoder often matches on semantic similarity and misses
 /// the exact identifier, so BM25 gets more weight for these queries.
 fn has_specific_identifier(query: &str) -> bool {
     query.split_whitespace().any(|w| {
         w.contains('_') || w.contains('.') || w.contains('-')
             || w.chars().any(|c| c.is_ascii_digit())
+            // camelCase: uppercase letter not at the start (e.g. ExecStart,
+            // HttpClient). Single leading capitals ("Rust", "The") are common
+            // words and don't indicate an identifier.
+            || w.chars().skip(1).any(|c| c.is_ascii_uppercase())
     })
 }
 
