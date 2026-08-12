@@ -1,3 +1,25 @@
+- name: brave
+  type: html
+  categories:
+  - general
+  weight: 2.0
+  search_url: https://search.brave.com/search?q={query}
+  html:
+    results: .snippet[data-type="web"]
+    url: a.l1
+    title: .search-snippet-title
+    content: .snippet-description
+- name: bing
+  type: html
+  categories:
+  - general
+  weight: 2.0
+  search_url: https://www.bing.com/search?q={query}
+  html:
+    results: .b_algo
+    url: h2 a
+    title: h2 a
+    content: .b_caption p
 - name: wikipedia
   type: json
   categories:
