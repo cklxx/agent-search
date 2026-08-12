@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
+use fastembed::{
+    OnnxSource, RerankInitOptions, RerankInitOptionsUserDefined, RerankerModel, TextRerank,
+    TokenizerFiles, UserDefinedRerankingModel,
+};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::Value;
 use tokenizers::Tokenizer;
@@ -500,12 +503,13 @@ impl BgeRerankerStrategy {
         // Pool size and intra_threads are tuned so total onnx threads ≈ CPU
         // cores: pool_size * intra_threads ≈ cores. On machines with many
         // cores (e.g. 64), we use a larger pool to parallelize across
-        // concurrent requests. Each instance uses ~1.4GB memory.
+        // concurrent requests. Each instance uses ~300MB with the INT8
+        // model (~1.4GB with fp32 fallback).
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
         let intra_threads = Self::INTRA_THREADS;
-        // Cap pool size at 8 to bound memory (~11GB for 8 instances).
+        // Cap pool size at 8 to bound memory (~2.4GB INT8, ~11GB fp32).
         let pool_size = (cores / intra_threads).clamp(1, 8);
         let mut pool = Vec::with_capacity(pool_size);
         let mut call_counts = Vec::with_capacity(pool_size);
@@ -521,14 +525,36 @@ impl BgeRerankerStrategy {
     }
 
     fn build_reranker(intra_threads: usize) -> anyhow::Result<TextRerank> {
-        let mut options = RerankInitOptions::default();
-        options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
-        options.cache_dir = std::path::PathBuf::from("models");
-        options.intra_threads = Some(intra_threads);
-        // 512 tokens matches the model's max position embeddings and gives
-        // the cross-encoder fuller context from titles + snippets.
-        options.max_length = 512;
-        TextRerank::try_new(options)
+        // Prefer the INT8 model (scripts/quantize.py): ~300MB per instance
+        // instead of ~1.4GB, 2-3x faster on CPU. Fall back to the fp32
+        // HuggingFace download when it is absent.
+        let int8_dir = std::path::Path::new("models/jina-reranker-v2-int8");
+        let int8_model = int8_dir.join("model.onnx");
+        if int8_model.exists() {
+            let read = |name: &str| std::fs::read(int8_dir.join(name));
+            let model = UserDefinedRerankingModel::new(
+                OnnxSource::File(int8_model),
+                TokenizerFiles {
+                    tokenizer_file: read("tokenizer.json")?,
+                    config_file: read("config.json")?,
+                    special_tokens_map_file: read("special_tokens_map.json")?,
+                    tokenizer_config_file: read("tokenizer_config.json")?,
+                },
+            );
+            let mut options = RerankInitOptionsUserDefined::new();
+            options.max_length = 512;
+            options.intra_threads = Some(intra_threads);
+            TextRerank::try_new_from_user_defined(model, options)
+        } else {
+            let mut options = RerankInitOptions::default();
+            options.model_name = RerankerModel::JINARerankerV2BaseMultiligual;
+            options.cache_dir = std::path::PathBuf::from("models");
+            options.intra_threads = Some(intra_threads);
+            // 512 tokens matches the model's max position embeddings and gives
+            // the cross-encoder fuller context from titles + snippets.
+            options.max_length = 512;
+            TextRerank::try_new(options)
+        }
     }
 }
 
@@ -708,29 +734,52 @@ const QUERY_EMBED_TOKEN_ID: u32 = 151671;
 /// outputs projected embeddings at `<|embed_token|>` (per document) and
 /// `<|rerank_token|>` (query) positions; relevance is the cosine similarity
 /// between each document embedding and the query embedding.
+///
+/// A session pool lets concurrent requests run on separate sessions instead
+/// of serializing on a single Mutex.
 pub struct JinaV3RerankerStrategy {
-    session: Mutex<Session>,
+    pool: Vec<Arc<Mutex<Session>>>,
+    next: AtomicUsize,
     tokenizer: Tokenizer,
 }
 
 impl JinaV3RerankerStrategy {
+    const INTRA_THREADS: usize = 4;
+
     pub fn new() -> anyhow::Result<Self> {
         let model_dir = std::path::Path::new("models/jina-reranker-v3");
-        let num_threads = std::thread::available_parallelism()
+        // Prefer the INT8 model (scripts/quantize.py): ~550MB per session
+        // instead of ~2.2GB, 2-3x faster on CPU.
+        let model_path = ["model.int8.onnx", "model.onnx"]
+            .iter()
+            .map(|name| model_dir.join(name))
+            .find(|p| p.exists())
+            .ok_or_else(|| {
+                anyhow::anyhow!("jina-reranker-v3 model not found in {}", model_dir.display())
+            })?;
+        let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let session = Session::builder()
-            .map_err(|e| anyhow::anyhow!("session builder failed: {}", e))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow::anyhow!("set optimization level failed: {}", e))?
-            .with_intra_threads(num_threads)
-            .map_err(|e| anyhow::anyhow!("set intra threads failed: {}", e))?
-            .commit_from_file(model_dir.join("model.onnx"))
-            .map_err(|e| anyhow::anyhow!("load model failed: {}", e))?;
+        // Total onnx threads ≈ cores; cap at 4 sessions to bound memory
+        // (~2.2GB INT8, ~8.8GB fp32 fallback).
+        let pool_size = (cores / Self::INTRA_THREADS).clamp(1, 4);
+        let mut pool = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let session = Session::builder()
+                .map_err(|e| anyhow::anyhow!("session builder failed: {}", e))?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .map_err(|e| anyhow::anyhow!("set optimization level failed: {}", e))?
+                .with_intra_threads(Self::INTRA_THREADS)
+                .map_err(|e| anyhow::anyhow!("set intra threads failed: {}", e))?
+                .commit_from_file(&model_path)
+                .map_err(|e| anyhow::anyhow!("load model failed: {}", e))?;
+            pool.push(Arc::new(Mutex::new(session)));
+        }
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))?;
         Ok(Self {
-            session: Mutex::new(session),
+            pool,
+            next: AtomicUsize::new(0),
             tokenizer,
         })
     }
@@ -782,7 +831,9 @@ impl JinaV3RerankerStrategy {
         let input_ids_value = Value::from_array(input_ids_array)?;
         let attention_mask_value = Value::from_array(attention_mask_array)?;
 
-        let mut session = self.session.lock().unwrap();
+        // Round-robin pick a session from the pool.
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.pool.len();
+        let mut session = self.pool[idx].lock().unwrap();
         let outputs = session.run(ort::inputs![
             "input_ids" => input_ids_value,
             "attention_mask" => attention_mask_value,
@@ -950,7 +1001,7 @@ impl RankingStrategy for JinaV3RerankerStrategy {
 }
 
 /// Cached bge_reranker instance. Loading the model pool is expensive
-/// (~2.4GB for 8 instances), so we build it once and reuse it across
+/// (~2.4GB for 8 INT8 instances), so we build it once and reuse it across
 /// /search/ab requests.
 static BGE_RERANKER: OnceLock<Option<Arc<dyn RankingStrategy>>> = OnceLock::new();
 static JINA_V3_RERANKER: OnceLock<Option<Arc<dyn RankingStrategy>>> = OnceLock::new();
