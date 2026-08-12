@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
+use ort::session::{Session, builder::GraphOptimizationLevel};
+use ort::value::Value;
+use tokenizers::Tokenizer;
 
 use crate::models::query::SearchQuery;
 use crate::models::result::RawSearchResult;
@@ -694,10 +697,263 @@ impl RankingStrategy for BgeRerankerStrategy {
     }
 }
 
+// Special token IDs for jina-reranker-v3.
+const DOC_EMBED_TOKEN_ID: u32 = 151670;
+const QUERY_EMBED_TOKEN_ID: u32 = 151671;
+
+/// jina-reranker-v3 listwise reranker via ONNX Runtime.
+///
+/// Unlike the pointwise cross-encoder (jina-reranker-v2), v3 processes the
+/// query and all candidate documents in a single forward pass. The model
+/// outputs projected embeddings at `<|embed_token|>` (per document) and
+/// `<|rerank_token|>` (query) positions; relevance is the cosine similarity
+/// between each document embedding and the query embedding.
+pub struct JinaV3RerankerStrategy {
+    session: Mutex<Session>,
+    tokenizer: Tokenizer,
+}
+
+impl JinaV3RerankerStrategy {
+    pub fn new() -> anyhow::Result<Self> {
+        let model_dir = std::path::Path::new("models/jina-reranker-v3");
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let session = Session::builder()
+            .map_err(|e| anyhow::anyhow!("session builder failed: {}", e))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("set optimization level failed: {}", e))?
+            .with_intra_threads(num_threads)
+            .map_err(|e| anyhow::anyhow!("set intra threads failed: {}", e))?
+            .commit_from_file(model_dir.join("model.onnx"))
+            .map_err(|e| anyhow::anyhow!("load model failed: {}", e))?;
+        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("tokenizer load failed: {}", e))?;
+        Ok(Self {
+            session: Mutex::new(session),
+            tokenizer,
+        })
+    }
+
+    /// Build the listwise prompt following jina-reranker-v3's format.
+    fn format_prompt(query: &str, docs: &[String]) -> String {
+        let mut prompt = String::from(
+            "<|im_start|>system\n\
+             You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. \
+             If the query is a question, how relevant a passage is depends on how well it answers the question. \
+             If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. \
+             If an instruction is provided, you should follow the instruction when determining the ranking.\
+             <|im_end|>\n<|im_start|>user\n",
+        );
+        prompt.push_str(&format!(
+            "I will provide you with {} passages, each indicated by a numerical identifier. \
+             Rank the passages based on their relevance to query: {}\n",
+            docs.len(),
+            query
+        ));
+        for (i, doc) in docs.iter().enumerate() {
+            prompt.push_str(&format!(
+                "<passage id=\"{}\">\n{}<|embed_token|>\n</passage>\n",
+                i, doc
+            ));
+        }
+        prompt.push_str(&format!("<query>\n{}<|rerank_token|>\n</query>", query));
+        prompt.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        prompt
+    }
+
+    /// Run the listwise reranker and return cosine-similarity scores per doc.
+    fn rerank(&self, query: &str, docs: &[String]) -> anyhow::Result<Vec<f32>> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prompt = Self::format_prompt(query, docs);
+        let encoding = self.tokenizer.encode(prompt, true)
+            .map_err(|e| anyhow::anyhow!("tokenize failed: {}", e))?;
+        let ids = encoding.get_ids();
+        let seq_len = ids.len();
+
+        let input_ids: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
+        let attention_mask: Vec<i64> = vec![1; seq_len];
+
+        let input_ids_array = ndarray::Array2::from_shape_vec((1, seq_len), input_ids)?;
+        let attention_mask_array = ndarray::Array2::from_shape_vec((1, seq_len), attention_mask)?;
+
+        let input_ids_value = Value::from_array(input_ids_array)?;
+        let attention_mask_value = Value::from_array(attention_mask_array)?;
+
+        let mut session = self.session.lock().unwrap();
+        let outputs = session.run(ort::inputs![
+            "input_ids" => input_ids_value,
+            "attention_mask" => attention_mask_value,
+        ])?;
+
+        let (shape, projected_data) = outputs["projected"].try_extract_tensor::<f32>()?;
+        // projected shape: (1, seq_len, 512)
+        let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
+        let hidden = dims[2];
+
+        // Find positions of doc and query embed tokens.
+        let mut doc_positions: Vec<usize> = Vec::new();
+        let mut query_position: Option<usize> = None;
+        for (i, &id) in ids.iter().enumerate() {
+            if id == DOC_EMBED_TOKEN_ID {
+                doc_positions.push(i);
+            } else if id == QUERY_EMBED_TOKEN_ID {
+                query_position = Some(i);
+            }
+        }
+
+        let query_pos = query_position
+            .ok_or_else(|| anyhow::anyhow!("query embed token not found in prompt"))?;
+
+        // Extract query embedding.
+        let query_offset = query_pos * hidden;
+        let query_embed: Vec<f32> = (0..hidden)
+            .map(|d| projected_data[query_offset + d])
+            .collect();
+        let query_norm = (query_embed.iter().map(|x| x * x).sum::<f32>()).sqrt();
+
+        // Compute cosine similarity for each document.
+        let mut scores = Vec::with_capacity(doc_positions.len());
+        for &pos in &doc_positions {
+            let offset = pos * hidden;
+            let mut dot = 0.0f32;
+            let mut doc_norm_sq = 0.0f32;
+            for d in 0..hidden {
+                let v = projected_data[offset + d];
+                dot += v * query_embed[d];
+                doc_norm_sq += v * v;
+            }
+            let doc_norm = doc_norm_sq.sqrt();
+            let score = if query_norm > 0.0 && doc_norm > 0.0 {
+                dot / (query_norm * doc_norm)
+            } else {
+                0.0
+            };
+            scores.push(score);
+        }
+
+        Ok(scores)
+    }
+}
+
+impl RankingStrategy for JinaV3RerankerStrategy {
+    fn name(&self) -> &str {
+        "jina_v3_reranker"
+    }
+
+    fn score(&self, raw: &RawSearchResult, query: &SearchQuery, engine_weight: f32, _engines: &[String]) -> f32 {
+        let items = [(raw.clone(), Vec::new(), engine_weight)];
+        self.score_batch(&items, query).pop().unwrap_or(0.0)
+    }
+
+    fn score_batch(
+        &self,
+        items: &[(RawSearchResult, Vec<String>, f32)],
+        query: &SearchQuery,
+    ) -> Vec<f32> {
+        if items.is_empty() {
+            return Vec::new();
+        }
+
+        const TOP_N: usize = 10;
+
+        // Coarse rank with BM25 + position to select top-N candidates.
+        // jina-reranker-v3 is listwise: all docs share one forward pass, so
+        // memory and latency grow quadratically with sequence length. 10 docs
+        // * ~256 chars ≈ 800 tokens ≈ 2-5s on CPU with 64 threads.
+        let bm25_scores: Vec<f32> = items
+            .iter()
+            .map(|(raw, _, _)| {
+                let bm25 = bm25_score(raw, query);
+                let position_weight = 1.0 / (raw.position as f32 + 2.0).log2();
+                bm25 * position_weight
+            })
+            .collect();
+
+        let mut indices: Vec<usize> = (0..items.len()).collect();
+        indices.sort_by(|&a, &b| {
+            bm25_scores[b]
+                .partial_cmp(&bm25_scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let top_indices: Vec<usize> = indices.into_iter().take(TOP_N).collect();
+
+        let documents: Vec<String> = top_indices
+            .iter()
+            .map(|&i| {
+                let (raw, _, _) = &items[i];
+                let snippet = extract_relevant_snippet(&raw.snippet, &query.query, 128);
+                let mut doc = format!("{} {}", raw.title, snippet);
+                // jina-reranker-v3 is listwise: total prompt length drives
+                // memory and latency (O(n^2) attention). Cap each doc at 256
+                // chars so 10 docs fit in ~800 tokens.
+                if let Some((idx, _)) = doc.char_indices().nth(256) {
+                    doc.truncate(idx);
+                }
+                doc
+            })
+            .collect();
+
+        let is_exact_match_query = needs_exact_match(&query.query);
+        let (bm25_weight, ce_weight) = if is_exact_match_query {
+            (0.80, 0.20)
+        } else {
+            (0.45, 0.55)
+        };
+
+        let acronym_terms: Vec<String> = if has_technical_acronym(&query.query) {
+            extract_acronyms(&query.query)
+        } else {
+            Vec::new()
+        };
+
+        // Initialize all scores with normalized BM25 so docs outside top-N
+        // still get a reasonable ranking instead of being zeroed out.
+        let mut scores: Vec<f32> = bm25_scores.iter().map(|&s| normalize(s)).collect();
+
+        match self.rerank(&query.query, &documents) {
+            Ok(ce_scores) => {
+                for (i, &ce_score) in ce_scores.iter().enumerate() {
+                    let orig_idx = top_indices[i];
+                    let (raw, _, weight) = &items[orig_idx];
+                    let authority = domain_authority(&raw.url);
+                    let freshness = freshness_weight(raw.published_date);
+                    // Cosine similarity is in [-1, 1]; map to [0, 1].
+                    let mut relevance = (ce_score + 1.0) / 2.0;
+                    if !acronym_terms.is_empty() {
+                        let text = format!("{} {}", raw.title, raw.snippet).to_uppercase();
+                        if !acronym_terms.iter().any(|a| text.contains(a.as_str())) {
+                            relevance = 0.0;
+                        }
+                    }
+                    let bm25_norm = normalize(bm25_scores[orig_idx]);
+                    let blended = bm25_weight * bm25_norm + ce_weight * relevance;
+                    let (authority_factor, weight_factor) = if is_exact_match_query {
+                        (1.0, 1.0)
+                    } else {
+                        (authority.clamp(0.3, 1.3), weight.clamp(0.7, 1.3))
+                    };
+                    let raw_score = blended * authority_factor * weight_factor * freshness;
+                    scores[orig_idx] = raw_score.clamp(0.0, 1.0);
+                }
+            }
+            Err(e) => {
+                tracing::error!("jina v3 rerank failed for query '{}': {}", query.query, e);
+            }
+        }
+
+        scores
+    }
+}
+
 /// Cached bge_reranker instance. Loading the model pool is expensive
 /// (~2.4GB for 8 instances), so we build it once and reuse it across
 /// /search/ab requests.
 static BGE_RERANKER: OnceLock<Option<Arc<dyn RankingStrategy>>> = OnceLock::new();
+static JINA_V3_RERANKER: OnceLock<Option<Arc<dyn RankingStrategy>>> = OnceLock::new();
 
 pub fn get_strategy(name: &str) -> Option<Arc<dyn RankingStrategy>> {
     match name {
@@ -719,6 +975,18 @@ pub fn get_strategy(name: &str) -> Option<Arc<dyn RankingStrategy>> {
             });
             cached.clone()
         }
+        "jina_v3_reranker" => {
+            let cached = JINA_V3_RERANKER.get_or_init(|| {
+                match JinaV3RerankerStrategy::new() {
+                    Ok(s) => Some(Arc::new(s)),
+                    Err(e) => {
+                        eprintln!("Failed to load jina-reranker-v3: {}", e);
+                        None
+                    }
+                }
+            });
+            cached.clone()
+        }
         _ => None,
     }
 }
@@ -732,5 +1000,6 @@ pub fn strategy_names() -> Vec<&'static str> {
         "bm25_title_boost",
         "searxng_only",
         "bge_reranker",
+        "jina_v3_reranker",
     ]
 }
